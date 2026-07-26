@@ -1,7 +1,7 @@
 # Test suite
 
 Black-box integration tests for `server.js` and pure-math tests for the
-`public/renderer.js` utilities. No new dependencies — uses Node's
+`public/renderer.js` utilities. No new dependencies; it uses Node's
 built-in `node:test` runner and the `ws` package already in the project.
 
 ## Running
@@ -69,7 +69,7 @@ tests/
 - **Player management**: `setPlayers` count clamping to `[1, 4]`
   (including fractional truncation via `|0` and non-numeric →1);
   `basePort` fallback to default for 0/negative/non-numeric, and for an
-  omitted `basePort` — which is what the page sends, so this is the path
+  omitted `basePort`, which is what the page sends, so this is the path
   that makes `UDP_PORT` mean anything;
   describePlayers payload is sorted; `stop` releases the ports;
   `setPlayers` replaces existing listeners; bind error on a busy port
@@ -88,12 +88,12 @@ tests/
   require a browser, depend on `THREE.*` and the DOM, and produce
   visual output rather than asserts-friendly state. The existing
   `scripts/screenshot-scenes.mjs` is the project's visual smoke test
-  for these — keep that as the gate for regressions in scene content.
+  for these, so keep that as the gate for regressions in scene content.
 - **UI behavior** (toolbar, player toggles, keyboard, sparklines,
   smoothing toggle, FX toggle, cycle timer). Browser-only. See above.
 - **OpenTrack input over the real network**: tests bind to `127.0.0.1`
   only; cross-host UDP behavior is delegated to the OS.
-- **The image itself**: not covered here, but not untested either —
+- **The image itself**: not covered here, but not untested either.
   `pixi run smoke` (`scripts/smoke.mjs`) boots the built container and
   drives `/healthz`, the viewer page, the WebSocket control channel and a
   real OpenTrack datagram through it. CI runs it alongside this suite.
@@ -101,7 +101,7 @@ tests/
 ## Notable behaviors captured as characterization tests
 
 A few server behaviors that aren't obviously specified but that the
-tests now pin down — if you change these, expect tests to break and
+tests now pin down. If you change these, expect tests to break and
 update them deliberately:
 
 - **Percent-encoded slashes are not decoded.** A request for

@@ -124,7 +124,7 @@ const pixiVersion = /^version = "[^"]*"$/m;
 if (!pixiVersion.test(pixiToml)) abort('pixi.toml has no [workspace] version line to update');
 fs.writeFileSync(pixiPath, pixiToml.replace(pixiVersion, `version = "${version}"`));
 
-fs.writeFileSync(changelogPath, changelog.replace(unreleasedHeading, `## ${version} — ${today}`));
+fs.writeFileSync(changelogPath, changelog.replace(unreleasedHeading, `## ${version} (${today})`));
 console.log(`  package.json, package-lock.json, pixi.toml, CHANGELOG.md`);
 
 // ---------- commit, tag, push ----------

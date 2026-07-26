@@ -2,7 +2,7 @@
 
 These files are shipped verbatim so the viewer needs no build step and no CDN.
 
-## three.js — r160
+## three.js r160
 
 `three.module.js`, `postprocessing/*`, `shaders/*`
 

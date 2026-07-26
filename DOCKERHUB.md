@@ -14,23 +14,36 @@ CDN, no telemetry leaving your machine.
 
 ## Quick start
 
-```sh
-docker run --rm --network=host itsloopyo/head-tracking-tester
-```
-
-Open <http://localhost:8080>. Listeners bind automatically. Pick 1 to 4 players in the
-toolbar and each pane takes one consecutive UDP port from 4242 up.
-
-Host networking is the simple case, because OpenTrack sends UDP straight to the host. If
-it is not available (Docker Desktop on macOS or Windows), publish the ports explicitly.
-Note that OpenTrack must then target the Docker VM's address rather than `localhost`:
+Works the same on Windows, macOS and Linux:
 
 ```sh
-docker run --rm \
+docker run --rm --name htt \
   -p 8080:8080 \
   -p 4242:4242/udp -p 4243:4243/udp -p 4244:4244/udp -p 4245:4245/udp \
   itsloopyo/head-tracking-tester
 ```
+
+Open <http://localhost:8080>. Listeners bind automatically. Pick 1 to 4 players in the
+toolbar and each pane takes one consecutive UDP port from 4242 up. Point OpenTrack at
+UDP 4242.
+
+If the run fails with `address already in use`, something else on your machine has port
+8080. Change the number on the left of the colon and use that instead, for example
+`-p 9999:8080`, then open <http://localhost:9999>.
+
+### On a Linux host
+
+Host networking saves you publishing each UDP port, because OpenTrack can then reach the
+container directly:
+
+```sh
+docker run --rm --network=host itsloopyo/head-tracking-tester
+```
+
+This only works on a real Linux host. On Docker Desktop for Windows or macOS,
+`--network=host` puts the container in the Linux VM's network namespace, so
+`localhost:8080` on your machine will not reach it. Use the published-ports command
+above instead.
 
 ## Tags
 

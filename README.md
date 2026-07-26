@@ -5,10 +5,10 @@
 [![Image size](https://img.shields.io/docker/image-size/itsloopyo/head-tracking-tester/latest?logo=docker&logoColor=white&label=image)](https://hub.docker.com/r/itsloopyo/head-tracking-tester)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A browser-based 6DoF viewer for [OpenTrack](https://github.com/opentrack/opentrack) UDP output, and a bench for
-judging how good a tracker actually is. Point up to four trackers at it, watch them
-drive the same scene side by side, and read off rate, jitter, noise, duplicate
-frames and relative lag for each one.
+A browser-based 6DoF viewer for [OpenTrack](https://github.com/opentrack/opentrack) UDP
+output, and a bench for judging how good a tracker actually is. Point up to four trackers
+at it, watch them drive the same scene side by side, and read off rate, jitter, noise,
+duplicate frames and relative lag for each one.
 
 A small Node bridge listens for OpenTrack UDP packets and forwards parsed poses to the
 page over a WebSocket. The page renders a Three.js scene per tracker. No build step, no
@@ -16,26 +16,45 @@ CDN, no telemetry leaving the machine.
 
 ## Quick start
 
-```sh
-docker run --rm --network=host itsloopyo/head-tracking-tester
-```
-
-Open <http://localhost:8080>. Listeners bind automatically — pick 1–4 players in the
-toolbar and each pane takes one consecutive UDP port from `4242` up.
-
-Host networking is the simple case because OpenTrack sends UDP to the host directly. If
-it isn't available (Docker Desktop on macOS/Windows), publish the ports explicitly and
-point OpenTrack at the Docker VM's address rather than `localhost`:
+Works the same on Windows, macOS and Linux:
 
 ```sh
-docker run --rm \
+docker run --rm --name htt \
   -p 8080:8080 \
   -p 4242:4242/udp -p 4243:4243/udp -p 4244:4244/udp -p 4245:4245/udp \
   itsloopyo/head-tracking-tester
 ```
 
-Images are published for `linux/amd64` and `linux/arm64`, and mirrored to
-`ghcr.io/itsloopyo/head-tracking-tester`.
+Open <http://localhost:8080>. Listeners bind automatically, so pick 1 to 4 players in the
+toolbar and each pane takes one consecutive UDP port from `4242` up. Point OpenTrack at
+UDP `4242`.
+
+If the run fails with `address already in use`, something else on your machine has port
+8080. Change the number on the left of the colon and use that instead:
+
+```sh
+-p 9999:8080    # then open http://localhost:9999
+```
+
+### On a Linux host
+
+Host networking saves you publishing each UDP port, because OpenTrack can then reach the
+container directly:
+
+```sh
+docker run --rm --network=host itsloopyo/head-tracking-tester
+```
+
+This only works on a real Linux host. On Docker Desktop for Windows or macOS,
+`--network=host` puts the container in the Linux VM's network namespace, so
+`localhost:8080` on your machine will not reach it. Use the published-ports command above
+instead.
+
+### Image tags
+
+`latest`, plus `MAJOR.MINOR.PATCH`, `MAJOR.MINOR` and `MAJOR` for every release. Built for
+`linux/amd64` and `linux/arm64`, published with build provenance and an SBOM, and mirrored
+to `ghcr.io/itsloopyo/head-tracking-tester`.
 
 ### Without Docker
 
@@ -50,8 +69,8 @@ Node 20 or newer. The only runtime dependency is `ws`.
 
 Set **Output** to **UDP over network** and point it at the machine running this app on
 port `4242` (the second tracker uses `4243`, and so on). The wire format is OpenTrack's
-default: six little-endian `float64`s per packet — `X, Y, Z, Yaw, Pitch, Roll`, with
-translation in cm and rotation in degrees.
+default: six little-endian `float64`s per packet, ordered `X, Y, Z, Yaw, Pitch, Roll`,
+with translation in cm and rotation in degrees.
 
 Anything that speaks that format works; nothing here is OpenTrack-specific.
 
@@ -59,16 +78,16 @@ Anything that speaks that format works; nothing here is OpenTrack-specific.
 
 | Input | Action |
 | --- | --- |
-| **Space** / **R** | Recenter every pane — capture the current pose as the new zero |
+| **Space** / **R** | Recenter every pane, capturing the current pose as the new zero |
 | **W A S D** | Walk around the scene |
 | **Shift** | Run |
 | Mouse drag | Orbit the camera when a pane isn't tracking |
 | Click a pane's name | Rename it (persists in `localStorage`) |
-| **players 1–4** | Split the view; each pane binds the next UDP port |
+| **players 1-4** | Split the view; each pane binds the next UDP port |
 | **scene** / **cycle** | Pick a scene, or rotate through all of them every N seconds |
-| **smoothing** | Filter mode plus a responsive ↔ smooth dial; **advanced** exposes raw parameters |
+| **smoothing** | Filter mode plus a responsive-to-smooth dial; **advanced** exposes raw parameters |
 | **compare** | Live signal-quality scoreboard across panes |
-| **fx** | Bloom and tone mapping (off by default — it costs 40–50% of GPU time at four panes) |
+| **fx** | Bloom and tone mapping (off by default, since it costs 40 to 50% of GPU time at four panes) |
 
 Each pane also has its own **smooth** dropdown to pin a filter for that tracker alone.
 Touching the global smoothing control resets every pane back to global, so the two
@@ -82,7 +101,7 @@ tracker:
 | Field | Meaning |
 | --- | --- |
 | `gap` / `pk` | Mean and worst inter-packet arrival gap, in ms |
-| `jit` | Standard deviation of that gap — the tracker's timing consistency |
+| `jit` | Standard deviation of that gap, so the tracker's timing consistency |
 | `σ(Δ)` | Standard deviation of per-packet rotation deltas, per axis. The noise floor |
 | `pkΔ` | Largest single-packet rotation jump seen, per axis |
 | `rng` | Min/max angle range covered since the last recenter |
@@ -97,15 +116,15 @@ per row. Run two trackers off the same head at once and the differences are imme
 
 | Row | Meaning |
 | --- | --- |
-| `rate Hz` | Wire rate. Deliberately unranked — padding the stream with duplicates inflates it |
+| `rate Hz` | Wire rate. Deliberately unranked, because padding the stream with duplicates inflates it |
 | `eff Hz` | Delivery cadence after collapsing clumps. The honest version of `rate` |
 | `jit ms σ` | Arrival-time jitter |
-| `dup %` | Share of packets identical to the previous one — a tracker padding its output rate |
+| `dup %` | Share of packets identical to the previous one, which is a tracker padding its output rate |
 | `rev %` | Share of direction changes per axis. High values mean dither rather than motion |
 | `pk step °` | Largest single-packet jump. Spikes show up here before you feel them |
 | `σΔ °` | Noise floor |
-| `xtalk \|r\|` | Correlation between translation and rotation deltas — how much a solver leaks one into the other. Unranked, because noise dilutes the correlation and can flatter a noisy tracker |
-| `lag ms` | Lag against the reference pane, from peak yaw cross-correlation. Needs real head motion; a flat signal correlates with everything and shows `—` |
+| `xtalk \|r\|` | Correlation between translation and rotation deltas, so how much a solver leaks one into the other. Unranked, because noise dilutes the correlation and can flatter a noisy tracker |
+| `lag ms` | Lag against the reference pane, from peak yaw cross-correlation. Needs real head motion; a flat signal correlates with everything and shows a dash |
 
 The scoreboard assumes every tracker is following the same head.
 
@@ -120,8 +139,8 @@ The scoreboard assumes every tracker is following the same head.
 
 Two tuning constants live at the top of `public/renderer.js`:
 
-- `TRANSLATION_SCALE` — gain applied to incoming cm → scene metres.
-- `INVERT_Z` — flip the Z axis if "lean forward" goes the wrong way for your filter setup.
+- `TRANSLATION_SCALE` sets the gain applied to incoming cm as scene metres.
+- `INVERT_Z` flips the Z axis if "lean forward" goes the wrong way for your filter setup.
 
 ## Scenes
 
@@ -153,16 +172,25 @@ what it doesn't.
 
 ## Releasing
 
-Push a `v*` tag. The release workflow re-runs CI, builds `linux/amd64` and `linux/arm64`,
-and pushes to Docker Hub and GHCR with semver tags plus provenance and an SBOM, then
-opens a GitHub release.
+```sh
+pixi run release patch    # or minor, or major
+```
+
+That verifies the tree, bumps the version across `package.json`, `package-lock.json` and
+`pixi.toml`, dates the changelog's unreleased section, then commits, tags and pushes.
+Pushing the tag is what triggers the release workflow: it re-runs CI, builds
+`linux/amd64` and `linux/arm64`, pushes to Docker Hub and GHCR with semver tags plus
+provenance and an SBOM, then opens a GitHub release.
+
+It refuses to run unless the working tree is clean, you are on `main`, `main` matches
+`origin/main`, the tag is free, and the changelog has an `## Unreleased` heading.
 
 Docker Hub needs two repository secrets: `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
 GHCR uses the workflow's own `GITHUB_TOKEN`.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
 
 Bundles [three.js](https://github.com/mrdoob/three.js) r160, also MIT; see
 [`public/vendor/README.md`](public/vendor/README.md).

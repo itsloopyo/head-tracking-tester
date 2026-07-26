@@ -1,0 +1,25 @@
+[workspace]
+name = "head-tracking-tester"
+version = "1.0.0"
+description = "Browser-based 6DoF viewer driven by OpenTrack UDP output."
+authors = ["itsloopyo"]
+license = "MIT"
+channels = ["conda-forge"]
+platforms = ["win-64", "linux-64", "osx-arm64"]
+
+# Node here only drives the smoke-test orchestrator (it shells out to docker).
+# The app itself never runs on the host — see the Dockerfile.
+[dependencies]
+nodejs = ">=22,<25"
+
+[tasks]
+# Everything CI does, a developer runs with the identical command.
+# --no-cache-filter on the test stage only: dependency layers stay cached, but
+# the suite genuinely re-runs instead of replaying a "CACHED" line.
+test = "docker build --target test --no-cache-filter test --tag head-tracking-tester:test ."
+build = "docker build --tag head-tracking-tester:dev ."
+smoke = { cmd = "node scripts/smoke.mjs", depends-on = ["build"] }
+verify = { depends-on = ["test", "smoke"] }
+
+clean = "docker rm --force head-tracking-tester || echo no existing container"
+dev = { cmd = "docker run --rm --name head-tracking-tester -p 9999:8080 -p 4242:4242/udp -p 4243:4243/udp -p 4244:4244/udp -p 4245:4245/udp head-tracking-tester:dev", depends-on = ["build", "clean"] }

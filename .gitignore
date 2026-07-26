@@ -1,0 +1,10 @@
+node_modules
+dist
+.DS_Store
+*.log
+screenshots/
+.claude/
+.lab/
+.pixi/
+AGENTS.md
+CLAUDE.md

@@ -1,0 +1,43 @@
+{
+  "name": "head-tracking-tester",
+  "version": "0.0.0",
+  "description": "Browser-based 6DoF viewer driven by OpenTrack UDP data, served from a tiny Node bridge.",
+  "license": "MIT",
+  "author": "itsloopyo",
+  "homepage": "https://github.com/itsloopyo/head-tracking-tester#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itsloopyo/head-tracking-tester.git"
+  },
+  "bugs": {
+    "url": "https://github.com/itsloopyo/head-tracking-tester/issues"
+  },
+  "keywords": [
+    "opentrack",
+    "head-tracking",
+    "6dof",
+    "trackir",
+    "threejs",
+    "webgl",
+    "udp"
+  ],
+  "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "server.js",
+    "public"
+  ],
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test --test-reporter=spec",
+    "screenshots": "node scripts/screenshot-scenes.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  }
+}

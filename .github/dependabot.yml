@@ -1,0 +1,29 @@
+version: 2
+
+# cooldown keeps every bump at least three weeks behind its release, so a
+# compromised or yanked version has time to surface before it lands here.
+updates:
+  # Keeps the SHA-pinned actions on a runtime GitHub still supports; the
+  # "# vX.Y.Z" comment next to each pin is rewritten along with the SHA.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 21
+
+  # The Dockerfile's base image is pinned by digest, so this is the only
+  # thing that will notice a new node:24-alpine build.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 21
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 21

@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Head Tracking Tester</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Browser-based 6DoF viewer and signal-quality bench for OpenTrack head trackers." />
+  <!-- Inline so there's no second request and no 404 in the console. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e12'/%3E%3Ccircle cx='16' cy='16' r='8.5' fill='none' stroke='%234a9eea' stroke-width='2.5'/%3E%3Cpath d='M16 2.5v5M16 24.5v5M2.5 16h5M24.5 16h5' stroke='%234a9eea' stroke-width='2.5' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='16' r='2.75' fill='%2379e08a'/%3E%3C/svg%3E" />
+  <style>
+    html, body {
+      margin: 0; height: 100%;
+      background: #0b0e12; color: #e6e8eb;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      overflow: hidden;
+    }
+
+    /* ---------- top toolbar ---------- */
+    #toolbar {
+      /* Centred via auto margins rather than left:50% + translate: a
+         shrink-to-fit box anchored at left:50% only gets the right half of the
+         screen as available width, which makes it wrap at ~960px. */
+      position: absolute; top: 12px; left: 0; right: 0;
+      width: fit-content; margin: 0 auto;
+      z-index: 20;
+      display: flex; align-items: center; justify-content: center; gap: 14px;
+      /* The full control set is ~1320px wide; below that it wraps rather than
+         running off both edges of the screen. */
+      flex-wrap: wrap; max-width: calc(100vw - 24px);
+      padding: 8px 14px;
+      background: rgba(16, 20, 26, 0.86); backdrop-filter: blur(8px);
+      border: 1px solid #232a33; border-radius: 999px;
+      box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+      font-size: 12px;
+    }
+    #toolbar h1 {
+      font-size: 12px; margin: 0; font-weight: 600;
+      letter-spacing: 0.06em; color: #cfd6df;
+      white-space: nowrap;
+    }
+    #toolbar, #toolbar * { white-space: nowrap; }
+    .players-ctl { display: flex; align-items: center; gap: 6px; }
+    .players-ctl .lbl { color: #9aa3ad; }
+    .pcount {
+      width: 26px; height: 26px;
+      background: #0e131a; color: #cfd6df;
+      border: 1px solid #2a323c; border-radius: 6px;
+      font-weight: 700; cursor: pointer;
+      font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+    }
+    .pcount:hover { border-color: #3a4451; }
+    .pcount.on { background: #2f7dd9; border-color: #2f7dd9; color: white; }
+    .sselect {
+      height: 26px; padding: 0 24px 0 10px;
+      background: #0e131a; color: #cfd6df;
+      border: 1px solid #2a323c; border-radius: 6px;
+      font-family: inherit; font-size: 11px; cursor: pointer;
+      letter-spacing: 0.02em; line-height: 24px;
+      -webkit-appearance: none; -moz-appearance: none; appearance: none;
+      /* tiny chevron */
+      background-image: linear-gradient(45deg, transparent 50%, #cfd6df 50%),
+                        linear-gradient(135deg, #cfd6df 50%, transparent 50%);
+      background-position: right 12px center, right 7px center;
+      background-size: 5px 5px, 5px 5px;
+      background-repeat: no-repeat;
+    }
+    .sselect:hover { border-color: #3a4451; }
+    .sselect:focus { outline: none; border-color: #2f7dd9; }
+    .sselect option { background: #0e131a; color: #cfd6df; }
+    .nbox {
+      width: 44px; height: 26px; padding: 0 6px;
+      background: #0e131a; color: #cfd6df;
+      border: 1px solid #2a323c; border-radius: 6px;
+      font-family: inherit; font-size: 11px;
+      -moz-appearance: textfield;
+    }
+    .nbox::-webkit-outer-spin-button, .nbox::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .nbox:focus { outline: none; border-color: #2f7dd9; }
+    .toggle {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px; height: 26px;
+      background: #0e131a; color: #cfd6df;
+      border: 1px solid #2a323c; border-radius: 6px;
+      font-size: 11px; cursor: pointer;
+      font-family: inherit;
+    }
+    .toggle:hover { border-color: #3a4451; }
+    .toggle .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #4a5563; box-shadow: 0 0 0 1px #2a323c inset;
+    }
+    .toggle.on { background: #1e3b22; border-color: #2a5532; color: #aef0b8; }
+    .toggle.on .dot { background: #79e08a; box-shadow: 0 0 8px rgba(121, 224, 138, 0.7); }
+    .hint-mini { color: #6b7480; font-size: 11px; }
+    #bottomHint {
+      position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+      z-index: 18;
+      padding: 6px 14px;
+      background: rgba(16, 20, 26, 0.70); backdrop-filter: blur(6px);
+      border: 1px solid #232a33; border-radius: 999px;
+      color: #6b7480; font-size: 11px;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    #bottomHint b { color: #cfd6df; font-weight: 600; }
+    #bottomHint .sep { color: #3a4451; margin: 0 6px; }
+    .frange { -webkit-appearance: none; appearance: none; height: 4px; width: 120px;
+      background: #232a33; border-radius: 999px; outline: none; cursor: pointer; }
+    .frange:disabled { opacity: 0.4; cursor: default; }
+    .frange::-webkit-slider-thumb { -webkit-appearance: none; appearance: none;
+      width: 13px; height: 13px; border-radius: 50%; background: #4a9eea; border: none; }
+    .frange::-moz-range-thumb { width: 13px; height: 13px; border-radius: 50%; background: #4a9eea; border: none; }
+    #comparePanel {
+      /* Bottom-left: the top-left corner of every layout belongs to a pane's
+         stats card, and the scoreboard is read alongside them, not over them. */
+      position: absolute; bottom: 16px; left: 16px; z-index: 18;
+      display: none;
+      padding: 8px 12px 9px;
+      background: rgba(16, 20, 26, 0.82); backdrop-filter: blur(6px);
+      border: 1px solid #232a33; border-radius: 10px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 11px; color: #cfd6df;
+    }
+    #comparePanel table { border-collapse: collapse; }
+    #comparePanel th {
+      color: #e6e8eb; font-weight: 600; text-align: right;
+      padding: 2px 0 4px 14px; max-width: 110px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #comparePanel td { text-align: right; padding: 1px 0 1px 14px; }
+    #comparePanel th:first-child, #comparePanel td:first-child {
+      text-align: left; color: #6b7480; padding-left: 0;
+    }
+    #comparePanel td.best { color: #79e08a; }
+    #comparePanel td.worst { color: #ff7a76; }
+    #comparePanel .idlecol { opacity: 0.45; }
+    #comparePanel .note { margin-top: 6px; color: #6b7480; font-size: 10px; max-width: 380px; }
+
+    #filterAdvanced {
+      position: absolute; top: 52px; right: 16px; z-index: 18;
+      display: none;
+      padding: 8px 12px;
+      background: rgba(16, 20, 26, 0.82); backdrop-filter: blur(6px);
+      border: 1px solid #232a33; border-radius: 10px;
+      color: #9aa3ad; font-size: 11px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+    }
+    #filterAdvanced .frow { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+    #filterAdvanced .fk { width: 78px; color: #9aa3ad; }
+    #filterAdvanced .fv { width: 48px; text-align: right; color: #cfd6df; }
+    #windowHud {
+      position: absolute; bottom: 12px; right: 16px;
+      z-index: 18;
+      display: none;
+      padding: 6px 14px;
+      background: rgba(16, 20, 26, 0.70); backdrop-filter: blur(6px);
+      border: 1px solid #232a33; border-radius: 999px;
+      color: #9aa3ad; font-size: 11px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    #windowHud b { color: #aef0b8; font-weight: 700; }
+    #windowHud .warn { color: #e0c879; }
+    /* Fixed window frame at the screen plane — locked to the monitor while the
+       world parallaxes behind it. This static reference is what makes the
+       off-axis shear read as "looking through a window" rather than "yawing". */
+    #windowFrame {
+      /* Above the 3D canvas but below the HUD — the frame is part of the
+         scene's illusion, the telemetry is not. */
+      position: absolute; inset: 0; z-index: 9;
+      display: none; pointer-events: none;
+      border: 26px ridge #3a424d;
+      border-radius: 4px;
+      box-shadow:
+        inset 0 0 0 1px rgba(0, 0, 0, 0.85),
+        inset 0 0 80px rgba(0, 0, 0, 0.55);
+    }
+    #masterStatus {
+      display: inline-block; padding: 3px 10px; border-radius: 999px;
+      background: #1c232c; color: #9aa3ad; font-size: 11px;
+    }
+    #masterStatus.live { background: #1e3b22; color: #79e08a; }
+    #masterStatus.err { background: #3b1e1e; color: #e07979; }
+
+    /* ---------- viewport grid ---------- */
+    #grid {
+      position: absolute; inset: 0;
+      display: grid; gap: 2px;
+      background: #000;
+    }
+    #grid.g1 { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+    #grid.g2 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
+    #grid.g3 { grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr; }
+    #grid.g4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+    .viewport {
+      position: relative; overflow: hidden;
+      background: #04060b;
+    }
+    .viewport > canvas.scene {
+      display: block; width: 100%; height: 100%;
+    }
+
+    /* ---------- center prompt ---------- */
+    .centerPrompt {
+      position: absolute; inset: 0; pointer-events: none;
+      display: none; align-items: center; justify-content: center;
+      flex-direction: column; gap: 14px; z-index: 5;
+    }
+    .centerPrompt .ring {
+      width: 90px; height: 90px; border-radius: 50%;
+      border: 2px solid rgba(121, 224, 138, 0.7);
+      box-shadow: 0 0 30px rgba(121, 224, 138, 0.35), inset 0 0 30px rgba(121, 224, 138, 0.2);
+      animation: pulse 1.8s ease-in-out infinite;
+    }
+    .centerPrompt .label {
+      font-size: 14px; letter-spacing: 0.04em; color: #e6e8eb;
+      text-shadow: 0 2px 12px rgba(0,0,0,0.8);
+    }
+    .centerPrompt .label b {
+      display: inline-block; padding: 2px 8px; margin: 0 2px;
+      background: rgba(121, 224, 138, 0.15); border: 1px solid rgba(121, 224, 138, 0.6);
+      border-radius: 6px; color: #aef0b8; font-weight: 700;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 0.85; }
+      50% { transform: scale(1.08); opacity: 1; }
+    }
+
+    /* ---------- per-player stats panel ---------- */
+    .pstats {
+      position: absolute; top: 10px; left: 10px;
+      width: 290px;
+      background: rgba(14, 18, 24, 0.84); backdrop-filter: blur(6px);
+      border: 1px solid #1f2630; border-radius: 8px;
+      padding: 8px 10px 9px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: 11px; line-height: 1.45;
+      color: #cfd6df;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.4);
+      z-index: 10;
+    }
+    .pstats .phead {
+      display: flex; align-items: center; gap: 6px;
+      padding-bottom: 6px; margin-bottom: 6px;
+      border-bottom: 1px solid #232a33;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    .pstats .ptitle {
+      font-weight: 700; font-size: 12px;
+      color: #e6e8eb; letter-spacing: 0.04em;
+    }
+    .pstats .pport { color: #6b7480; font-size: 11px; margin-left: 1px; }
+    .pstats .pStatus {
+      display: inline-block; padding: 1px 8px; border-radius: 999px;
+      background: #1c232c; color: #9aa3ad; font-size: 10px; letter-spacing: 0.04em;
+    }
+    .pstats .pStatus.live { background: #1e3b22; color: #79e08a; }
+    .pstats .pStatus.err { background: #3b1e1e; color: #e07979; }
+    .pstats .recenter {
+      margin-left: auto;
+      width: 24px; height: 24px;
+      background: #2f7dd9; color: white; border: 0; border-radius: 5px;
+      cursor: pointer; font-weight: 700;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .pstats .recenter:hover { background: #3a8be5; }
+
+    .pgrid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px;
+      padding-bottom: 6px; border-bottom: 1px solid #232a33;
+    }
+    .pgrid .scol-title {
+      grid-column: span 2;
+      color: #6b7480; font-size: 9px; text-transform: uppercase;
+      letter-spacing: 0.10em; margin: 2px 0 2px;
+    }
+    .pgrid .kv {
+      display: flex; gap: 6px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .pgrid .kv .k { color: #6b7480; min-width: 30px; }
+    .pgrid .kv .v { color: #e6e8eb; overflow: hidden; text-overflow: ellipsis; }
+
+    .pstats .pfilter-row {
+      display: flex; align-items: center; gap: 6px;
+      padding-bottom: 6px; margin-bottom: 6px;
+      border-bottom: 1px solid #232a33;
+    }
+    .pstats .pfilter-row .k { color: #6b7480; font-size: 10px; min-width: 30px; }
+    .pstats .pfilter-row .sselect {
+      height: 20px; line-height: 18px; font-size: 10px;
+      padding: 0 18px 0 6px;
+      background-position: right 9px center, right 5px center;
+    }
+    .pstats .pfilter-row .sselect.overridden { border-color: #2f7dd9; color: #e6e8eb; }
+    .pstats .pfilter-row .frange { flex: 1; width: auto; min-width: 0; }
+
+    .pstats .graph-row {
+      display: flex; align-items: center; gap: 6px;
+      margin: 5px 0 2px;
+    }
+    .pstats .graph-row .k { color: #6b7480; width: 30px; font-size: 10px; }
+    .pstats .graph-row .v { color: #e6e8eb; min-width: 48px; text-align: right; font-size: 10px; }
+    .pstats .graph-row canvas {
+      background: #0a0e15; border-radius: 3px;
+      flex: 1; height: 18px; min-width: 0; display: block;
+    }
+
+    .pstats .render-row {
+      display: flex; align-items: center; gap: 6px;
+      margin-top: 6px; padding-top: 5px;
+      border-top: 1px solid #232a33;
+      font-size: 10px;
+    }
+    .pstats .render-row .k { color: #6b7480; width: 22px; }
+    .pstats .render-row .v { color: #e6e8eb; min-width: 32px; text-align: right; }
+    .pstats .render-row canvas {
+      background: #0a0e15; border-radius: 3px;
+      flex: 1; height: 16px; min-width: 0; display: block;
+    }
+
+    .ok { color: #79e08a; } .warn { color: #e0c879; } .err { color: #e07979; }
+
+    /* For 4-player 2x2, shrink panels to avoid covering too much of each view */
+    #grid.g4 .pstats { width: 250px; font-size: 10px; }
+    #grid.g4 .pstats .ptitle { font-size: 11px; }
+    #grid.g3 .pstats { width: 260px; }
+
+    /* The centred toolbar pill lands on top-row panes on any normal display,
+       putting their recenter button out of reach. --toolbar-bottom is measured
+       at runtime because the pill wraps to two rows when the viewport is
+       narrow. g3 is a single row of three, so all of its panes are top-row. */
+    .viewport:nth-child(-n+2) .pstats,
+    #grid.g3 .pstats { top: calc(var(--toolbar-bottom, 58px) + 10px); }
+
+    /* ---------- big per-pane player name ---------- */
+    .pname {
+      position: absolute;
+      left: 50%;
+      bottom: 56px;
+      transform: translateX(-50%);
+      z-index: 9;
+      max-width: 80%;
+      padding: 4px 16px;
+      font-size: clamp(24px, 4.4vh, 46px);
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      color: #f2f4f7;
+      text-align: center;
+      text-shadow:
+        0 2px 16px rgba(0, 0, 0, 0.85),
+        0 0 24px rgba(0, 0, 0, 0.6);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      cursor: text;
+      user-select: text;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    .pname:hover {
+      background: rgba(16, 20, 26, 0.45);
+      border-color: rgba(255, 255, 255, 0.08);
+    }
+    .pname:focus {
+      outline: none;
+      background: rgba(16, 20, 26, 0.75);
+      border-color: #2f7dd9;
+      box-shadow: 0 0 0 3px rgba(47, 125, 217, 0.25);
+    }
+    /* In 3- and 4-pane layouts, scale the name down a bit so it doesn't dominate */
+    #grid.g3 .pname { font-size: clamp(20px, 3.6vh, 36px); }
+    #grid.g4 .pname { font-size: clamp(18px, 3.2vh, 32px); bottom: 44px; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <h1>Head Tracking Tester</h1>
+    <div class="players-ctl">
+      <span class="lbl">players</span>
+      <button class="pcount" data-n="1">1</button>
+      <button class="pcount" data-n="2">2</button>
+      <button class="pcount" data-n="3">3</button>
+      <button class="pcount" data-n="4">4</button>
+    </div>
+    <div class="players-ctl">
+      <span class="lbl">scene</span>
+      <select id="sceneSelect" class="sselect"></select>
+      <button id="cycleToggle" class="toggle" title="Cycle through scenes every N seconds">
+        <span class="dot"></span><span>cycle</span>
+      </button>
+      <input type="number" id="cycleSecs" class="nbox" min="1" max="3600" step="1" value="20" title="Seconds per scene" />
+      <span class="lbl">s</span>
+    </div>
+    <div class="players-ctl smoothing-ctl">
+      <span class="lbl">smoothing</span>
+      <select id="filterMode" class="sselect" title="Pose smoothing filter">
+        <option value="off">off</option>
+        <option value="classic">classic</option>
+        <option value="oneeuro">1€</option>
+        <option value="accela">accela</option>
+      </select>
+      <input type="range" id="filterAmount" class="frange" min="0" max="1" step="0.01" title="responsive ↔ smooth" />
+      <button id="filterAdvBtn" class="toggle" title="Show raw filter parameters">
+        <span>advanced</span>
+      </button>
+    </div>
+    <button id="compareToggle" class="toggle" title="Live signal-quality scoreboard across all panes">
+      <span class="dot"></span><span>compare</span>
+    </button>
+    <button id="fxToggle" class="toggle" title="Bloom + tone-mapping FX (off = fastest)">
+      <span class="dot"></span><span>fx</span>
+    </button>
+    <button id="windowToggle" class="toggle" title="Virtual window: 1:1 head-coupled off-axis perspective (single player). [ ] distance · - = screen width">
+      <span class="dot"></span><span>window</span>
+    </button>
+    <span id="masterStatus">idle</span>
+  </div>
+
+  <div id="filterAdvanced"></div>
+
+  <div id="comparePanel"></div>
+
+  <div id="windowHud"></div>
+  <div id="windowFrame"></div>
+
+  <div id="bottomHint">
+    <b>WASD</b> walk<span class="sep">·</span><b>Shift</b> run<span class="sep">·</span><b>Space</b>/<b>R</b> recenter<span class="sep">·</span>drag to orbit when idle
+  </div>
+
+  <div id="grid" class="g1"></div>
+
+  <!-- Per-player template (cloned into each viewport) -->
+  <template id="playerTemplate">
+    <div class="viewport">
+      <canvas class="scene"></canvas>
+      <div class="centerPrompt">
+        <div class="ring"></div>
+        <div class="label">Look forward, then press <b>SPACE</b> to center</div>
+      </div>
+      <div class="pname" contenteditable="true" spellcheck="false" title="Click to rename"></div>
+      <div class="pstats">
+        <div class="phead">
+          <span class="ptitle">P?</span>
+          <span class="pport">:????</span>
+          <span class="pStatus">idle</span>
+          <button class="recenter" title="Recenter (Space / R)">⟲</button>
+        </div>
+        <div class="pfilter-row" title="Smoothing for this pane only · changing the global smoothing resets every pane back to global">
+          <span class="k">smooth</span>
+          <select class="pfilter sselect">
+            <option value="global">global</option>
+            <option value="off">off</option>
+            <option value="classic">classic</option>
+            <option value="oneeuro">1€</option>
+            <option value="accela">accela</option>
+          </select>
+          <input type="range" class="pfilterAmt frange" min="0" max="1" step="0.01" title="responsive ↔ smooth" />
+        </div>
+        <div class="pgrid">
+          <div class="scol-title">pose</div>
+          <div class="kv"><span class="k">pos</span><span class="v tPos">—</span></div>
+          <div class="kv"><span class="k">rot</span><span class="v tRot">—°</span></div>
+          <div class="kv"><span class="k">Δrot</span><span class="v tDelta">—°</span></div>
+          <div class="kv"><span class="k">vel</span><span class="v tVel">— °/s</span></div>
+          <div class="kv"><span class="k">cam</span><span class="v tCam">—</span></div>
+          <div class="kv"><span class="k">zero</span><span class="v tZero">—</span></div>
+
+          <div class="scol-title">tracker</div>
+          <div class="kv"><span class="k">gap</span><span class="v tGap">—</span></div>
+          <div class="kv"><span class="k">pk</span><span class="v tPeakGap">—</span></div>
+          <div class="kv"><span class="k">jit</span><span class="v tJit">—</span></div>
+          <div class="kv"><span class="k">σ(Δ)</span><span class="v tSig">—</span></div>
+          <div class="kv"><span class="k">pkΔ</span><span class="v tPeak">—</span></div>
+          <div class="kv"><span class="k">rng</span><span class="v tRange">—</span></div>
+        </div>
+        <div class="graph-row">
+          <span class="k">rate</span>
+          <span class="v"><span class="tRate">0</span> Hz</span>
+          <canvas class="gPkt"></canvas>
+        </div>
+        <div class="graph-row" title="graph: per-packet arrival gap (ms) · eff = distinct delivery moments per second; if eff drops below rate, packets are arriving in clumps">
+          <span class="k">eff</span>
+          <span class="v"><span class="tEff">0</span> Hz</span>
+          <canvas class="gGap"></canvas>
+        </div>
+        <div class="render-row">
+          <span class="k">fps</span>
+          <span class="v"><span class="tFps">0</span></span>
+          <canvas class="gFps"></canvas>
+          <span class="v"><span class="tFrame">—</span></span>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js",
+        "three/addons/": "./vendor/"
+      }
+    }
+  </script>
+  <script type="module" src="./renderer.js"></script>
+</body>
+</html>

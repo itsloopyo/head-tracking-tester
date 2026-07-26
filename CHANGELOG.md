@@ -3,7 +3,7 @@
 Notable changes per release. Versions follow [semver](https://semver.org); the
 Docker Hub tags mirror them (`0.0.1`, `0.0`, `0`, `latest`).
 
-## Unreleased
+## 0.0.1 — 2026-07-26
 
 First public release. What's in it:
 

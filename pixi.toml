@@ -1,6 +1,6 @@
 [workspace]
 name = "head-tracking-tester"
-version = "0.0.0"
+version = "0.0.1"
 description = "Browser-based 6DoF viewer driven by OpenTrack UDP output."
 authors = ["itsloopyo"]
 license = "MIT"

@@ -3,6 +3,14 @@
 Notable changes per release. Versions follow [semver](https://semver.org); the
 Docker Hub tags mirror them (`0.0.1`, `0.0`, `0`, `latest`).
 
+## Unreleased
+
+- **Fixed: only one tracker reaching the container under Docker Desktop.** The
+  UDP ports were bound only when the page asked for players, so a tracker that
+  was already sending got "port unreachable" back, and Docker Desktop then
+  stopped forwarding that port until the container restarted. All four ports
+  are now bound at startup; the player count only picks which are shown.
+
 ## 0.0.1 (2026-07-26)
 
 First public release. What's in it:

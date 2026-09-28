@@ -23,7 +23,8 @@ docker run --rm --name htt \
   itsloopyo/head-tracking-tester
 ```
 
-Open <http://localhost:8080>. Listeners bind automatically. Pick 1 to 4 players in the
+Open <http://localhost:8080>. All four UDP ports are bound as soon as the container starts,
+so trackers can start sending before the page is open. Pick 1 to 4 players in the
 toolbar and each pane takes one consecutive UDP port from 4242 up. Point OpenTrack at
 UDP 4242.
 
@@ -102,7 +103,7 @@ per row:
 | `pk step` | Largest single-packet jump. Spikes show up here before you feel them |
 | `sigma` | Noise floor |
 | `xtalk` | Correlation between translation and rotation deltas, so how much a solver leaks one into the other |
-| `lag ms` | Lag against the reference pane, from peak yaw cross-correlation |
+| `lag ms` | Lag against the reference pane, from rotation cross-correlation on the server's arrival stamps. Relative only, and held with its age when the head stops moving |
 
 Run two trackers off the same head at once and the differences are immediate.
 

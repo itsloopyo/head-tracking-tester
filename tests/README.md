@@ -56,7 +56,7 @@ tests/
   extensions.
 - **Health endpoint**: `/healthz` returns 200 JSON while idle; query
   strings ignored; `listening` / `basePort` / `players` track what the
-  WebSocket control channel actually bound and released. This is what the
+  WebSocket control channel actually started and stopped. This is what the
   image's `HEALTHCHECK` polls.
 - **WebSocket protocol**: initial status broadcast on connect (both
   `stopped` and `listening`); broadcasts reach every connected client;
@@ -65,15 +65,16 @@ tests/
 - **UDP pose parsing**: valid 48-byte OpenTrack packets are forwarded
   with correct little-endian float64 values across all six fields;
   packets <48 bytes are dropped; oversize packets parse just the first
-  48 bytes; multi-player port→player tagging.
+  48 bytes; multi-player port→player tagging; all four ports are bound
+  before any client connects, and a datagram to a player that isn't shown
+  is dropped without an ICMP port-unreachable reply (Docker Desktop stops
+  forwarding a published UDP port for good after one).
 - **Player management**: `setPlayers` count clamping to `[1, 4]`
   (including fractional truncation via `|0` and non-numeric →1);
-  `basePort` fallback to default for 0/negative/non-numeric, and for an
-  omitted `basePort`, which is what the page sends, so this is the path
-  that makes `UDP_PORT` mean anything;
-  describePlayers payload is sorted; `stop` releases the ports;
-  `setPlayers` replaces existing listeners; bind error on a busy port
-  broadcasts `status: error` and then `stopped`.
+  players are reported on `UDP_PORT + index`; describePlayers payload is
+  sorted; `stop` and a smaller count stop forwarding but keep the ports
+  bound; a port busy at startup is reported as `ok: false` with its error
+  and is bound by a later `setPlayers` once it frees up.
 - **Renderer pure utilities**: `obraDinnAlpha` monotonicity in both
   smoothing and dt, closed-form match at the default, threshold gating;
   `applyDeadzone` boundary behavior, sign preservation, translation
@@ -112,23 +113,21 @@ update them deliberately:
   "let's decode URLs" change doesn't silently bypass the guard.
 - **`setPlayers` count clamp uses `| 0`.** Fractional counts are
   truncated (2.9 → 2); `NaN` becomes 0 and is then clamped up to 1.
-- **`basePort` fallback uses `Number(x) > 0`.** 0, negatives, and
-  anything non-numeric all fall back to the configured default port.
 - **`stopped` broadcast omits the `players` field but still carries
   `basePort`** (the listening broadcast has both). The page has no port
   control, so the connect-time greeting is where it learns which port to
   label its panes with. Tests rely on this shape.
-- **Bind failure emits two broadcasts in sequence**: first
-  `{state:'error', player, port, message}`, then `{state:'stopped'}`
-  (since no socket bound successfully so `sockets.size === 0` when
-  `broadcastStatus()` runs).
+- **A failed bind is reported twice**: a `{state:'error', player, port,
+  message}` broadcast when the attempt fails, and `ok: false` plus `message`
+  on that player's entry in every later `listening` status.
 
 ## Assumptions
 
 - Tests bind to `127.0.0.1` and assume the loopback interface works.
 - `freeConsecutiveUdpPorts(n)` finds N free consecutive UDP ports by
-  trial-bind; there's a tiny race window between probing and the
-  server grabbing them. In practice this hasn't been flaky on
+  trial-bind. `startServer` uses it to give every server instance its own
+  four ports, since the server binds them all at startup. There's a tiny
+  race window between probing and the server grabbing them. In practice this hasn't been flaky on
   localhost, but it's not formally race-free.
 - The renderer pure-utility tests rely on source-file markers
   (`function obraDinnAlpha`, `const DEG = Math.PI`, `function unwrapDeg`,

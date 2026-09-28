@@ -5,7 +5,7 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer } from '../helpers/server-harness.mjs';
-import { freeTcpPort, freeConsecutiveUdpPorts } from '../helpers/free-ports.mjs';
+import { freeTcpPort } from '../helpers/free-ports.mjs';
 import { createClient } from '../helpers/ws-client.mjs';
 
 let server;
@@ -36,11 +36,11 @@ describe('GET /healthz', () => {
     assert.equal((await res.json()).status, 'ok');
   });
 
-  test('reports the bound listeners once players are started', async () => {
-    const basePort = await freeConsecutiveUdpPorts(2);
+  test('reports the forwarded players once they are started', async () => {
+    const basePort = server.udpPort;
     const client = createClient(server.wsUrl);
     await client.connected();
-    client.send({ action: 'setPlayers', count: 2, basePort });
+    client.send({ action: 'setPlayers', count: 2 });
     await client.waitFor(
       (m) => m.type === 'status' && m.state === 'listening',
       { label: 'listening' },

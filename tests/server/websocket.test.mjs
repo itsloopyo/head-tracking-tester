@@ -10,7 +10,7 @@
 import { test, before, after, beforeEach, afterEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer } from '../helpers/server-harness.mjs';
-import { freeTcpPort, freeConsecutiveUdpPorts } from '../helpers/free-ports.mjs';
+import { freeTcpPort } from '../helpers/free-ports.mjs';
 import { createClient } from '../helpers/ws-client.mjs';
 
 let server;
@@ -30,21 +30,21 @@ before(async () => {
 after(async () => { if (server) await server.stop(); });
 
 afterEach(async () => {
-  // Close any test clients and stop listeners between cases so each
+  // Close any test clients and stop forwarding between cases so each
   // test starts from a known 'stopped' baseline.
   await Promise.all([...openClients].map((c) => c.close()));
   openClients.clear();
-  // Stop server-side listeners by opening one short-lived client.
+  // Stop forwarding by opening one short-lived client.
   const ctrl = createClient(server.wsUrl);
   await ctrl.connected();
   ctrl.send({ action: 'stop' });
-  // Brief drain; the server emits a 'stopped' status after teardown.
+  // Brief drain; the server emits a 'stopped' status after the stop.
   try { await ctrl.waitFor((m) => m.type === 'status' && m.state === 'stopped', { timeoutMs: 1500, label: 'stopped' }); } catch { /* already stopped */ }
   await ctrl.close();
 });
 
 describe('WebSocket: initial status & basic protocol', () => {
-  test('new client receives a stopped status immediately when no players are bound', async () => {
+  test('new client receives a stopped status immediately when no players are active', async () => {
     const c = await newClient();
     const msg = await c.waitFor((m) => m.type === 'status', { label: 'initial status' });
     assert.equal(msg.type, 'status');
@@ -54,9 +54,9 @@ describe('WebSocket: initial status & basic protocol', () => {
   test('a second client that connects mid-session also receives current state', async () => {
     // Start listeners via first client
     const a = await newClient();
-    const basePort = await freeConsecutiveUdpPorts(1);
+    const basePort = server.udpPort;
     a.drainStatus();
-    a.send({ action: 'setPlayers', count: 1, basePort });
+    a.send({ action: 'setPlayers', count: 1 });
     await a.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'A listening' });
 
     // Second client connecting should be told the current state without
@@ -107,8 +107,8 @@ describe('WebSocket: broadcast fan-out', () => {
     for (const x of [a, b, c]) await x.waitFor((m) => m.type === 'status', { label: 'greeting' });
     for (const x of [a, b, c]) x.drainStatus();
 
-    const basePort = await freeConsecutiveUdpPorts(2);
-    a.send({ action: 'setPlayers', count: 2, basePort });
+    const basePort = server.udpPort;
+    a.send({ action: 'setPlayers', count: 2 });
 
     const results = await Promise.all(
       [a, b, c].map((x) => x.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'listening broadcast' })),
@@ -129,9 +129,8 @@ describe('WebSocket: broadcast fan-out', () => {
   test('stop broadcast reaches every connected client', async () => {
     const [a, b] = await Promise.all([newClient(), newClient()]);
     for (const x of [a, b]) await x.waitFor((m) => m.type === 'status', { label: 'greeting' });
-    const basePort = await freeConsecutiveUdpPorts(1);
     a.drainStatus(); b.drainStatus();
-    a.send({ action: 'setPlayers', count: 1, basePort });
+    a.send({ action: 'setPlayers', count: 1 });
     await Promise.all([a, b].map((x) => x.waitFor((m) => m.type === 'status' && m.state === 'listening')));
 
     a.drainStatus(); b.drainStatus();
@@ -152,9 +151,8 @@ describe('WebSocket: broadcast fan-out', () => {
     // A subsequent broadcast must still succeed for the remaining
     // client. (If the server tried to send to b's closed socket
     // unconditionally, it would throw.)
-    const basePort = await freeConsecutiveUdpPorts(1);
     a.drainStatus();
-    a.send({ action: 'setPlayers', count: 1, basePort });
+    a.send({ action: 'setPlayers', count: 1 });
     const msg = await a.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'A still receives' });
     assert.equal(msg.state, 'listening');
   });

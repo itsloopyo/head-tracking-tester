@@ -13,7 +13,7 @@ import { test, before, after, afterEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import dgram from 'node:dgram';
 import { startServer } from '../helpers/server-harness.mjs';
-import { freeTcpPort, freeConsecutiveUdpPorts } from '../helpers/free-ports.mjs';
+import { freeTcpPort } from '../helpers/free-ports.mjs';
 import { createClient } from '../helpers/ws-client.mjs';
 
 let server;
@@ -75,9 +75,9 @@ describe('UDP → WebSocket pose forwarding', () => {
   test('valid 48-byte packet is parsed and forwarded with correct values', async () => {
     const c = await newClient();
     await c.waitFor((m) => m.type === 'status', { label: 'greeting' });
-    const basePort = await freeConsecutiveUdpPorts(1);
+    const basePort = server.udpPort;
     c.drainStatus();
-    c.send({ action: 'setPlayers', count: 1, basePort });
+    c.send({ action: 'setPlayers', count: 1 });
     await c.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'listening' });
 
     const pose = { x: 1.5, y: -2.25, z: 3.75, yaw: 10, pitch: -20, roll: 0.5 };
@@ -98,9 +98,9 @@ describe('UDP → WebSocket pose forwarding', () => {
   test('packet shorter than 48 bytes is silently dropped', async () => {
     const c = await newClient();
     await c.waitFor((m) => m.type === 'status', { label: 'greeting' });
-    const basePort = await freeConsecutiveUdpPorts(1);
+    const basePort = server.udpPort;
     c.drainStatus();
-    c.send({ action: 'setPlayers', count: 1, basePort });
+    c.send({ action: 'setPlayers', count: 1 });
     await c.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'listening' });
 
     const sender = newSender();
@@ -117,12 +117,12 @@ describe('UDP → WebSocket pose forwarding', () => {
     assert.equal(poses.length, 1, `expected exactly 1 pose, got ${poses.length}`);
   });
 
-  test('packet longer than 48 bytes is accepted and reads only the first 48 bytes', async () => {
+  test('packet longer than 48 bytes is accepted and the pose reads from the first 48', async () => {
     const c = await newClient();
     await c.waitFor((m) => m.type === 'status', { label: 'greeting' });
-    const basePort = await freeConsecutiveUdpPorts(1);
+    const basePort = server.udpPort;
     c.drainStatus();
-    c.send({ action: 'setPlayers', count: 1, basePort });
+    c.send({ action: 'setPlayers', count: 1 });
     await c.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'listening' });
 
     const pose = { x: 11, y: 22, z: 33, yaw: 44, pitch: 55, roll: 66 };
@@ -135,12 +135,66 @@ describe('UDP → WebSocket pose forwarding', () => {
     assert.equal(got.roll, 66);
   });
 
+  test('every pose carries a monotonic server arrival stamp', async () => {
+    // `rt` is the single clock the panes measure relative latency on. Without
+    // it the browser can only time arrivals through its own scheduler, which
+    // differs per pane and buries the differences being measured.
+    const c = await newClient();
+    await c.waitFor((m) => m.type === 'status', { label: 'greeting' });
+    const basePort = server.udpPort;
+    c.drainStatus();
+    c.send({ action: 'setPlayers', count: 1 });
+    await c.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'listening' });
+
+    const sender = newSender();
+    const pose = { x: 1, y: 2, z: 3, yaw: 4, pitch: 5, roll: 6 };
+    await send(sender, basePort, packOpenTrack(pose));
+    const first = await c.waitFor((m) => m.type === 'pose', { label: 'first pose' });
+    assert.equal(typeof first.rt, 'number');
+    assert.ok(Number.isFinite(first.rt), `rt was ${first.rt}`);
+
+    await new Promise((r) => setTimeout(r, 60));
+    await send(sender, basePort, packOpenTrack(pose));
+    const both = await c.waitFor(
+      () => c.messages.filter((m) => m.type === 'pose').length >= 2,
+      { label: 'second pose' },
+    ) && c.messages.filter((m) => m.type === 'pose');
+    assert.ok(both[1].rt > both[0].rt, `${both[1].rt} should be later than ${both[0].rt}`);
+    assert.ok(both[1].rt - both[0].rt >= 40, `expected ~60ms apart, got ${both[1].rt - both[0].rt}`);
+  });
+
+  test('a packet carrying an unusable pose value is dropped', async () => {
+    // Any 48 bytes decode to six doubles, so a mis-framed or hostile datagram
+    // can produce an infinity. One reaching the page hangs the tab: the angle
+    // unwrap subtracts 360 until the value is below 180 and never gets there.
+    const c = await newClient();
+    await c.waitFor((m) => m.type === 'status', { label: 'greeting' });
+    const basePort = server.udpPort;
+    c.drainStatus();
+    c.send({ action: 'setPlayers', count: 1 });
+    await c.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'listening' });
+
+    const sender = newSender();
+    // 1e300 is finite, and just as fatal: the page unwraps angles by
+    // subtracting 360, which at that magnitude rounds back to the same double
+    // and spins until the tab is killed.
+    for (const bad of [Infinity, -Infinity, NaN, 1e300, -1e300]) {
+      await send(sender, basePort, packOpenTrack({ x: 1, y: 2, z: 3, yaw: bad, pitch: 5, roll: 6 }));
+    }
+    await send(sender, basePort, packOpenTrack({ x: 7, y: 7, z: 7, yaw: 7, pitch: 7, roll: 7 }));
+
+    const got = await c.waitFor((m) => m.type === 'pose', { label: 'pose after non-finite' });
+    assert.equal(got.yaw, 7);
+    const poses = c.messages.filter((m) => m.type === 'pose');
+    assert.equal(poses.length, 1, `expected only the valid pose, got ${poses.length}`);
+  });
+
   test('multi-player: packet on basePort+i is tagged with player=i', async () => {
     const c = await newClient();
     await c.waitFor((m) => m.type === 'status', { label: 'greeting' });
-    const basePort = await freeConsecutiveUdpPorts(3);
+    const basePort = server.udpPort;
     c.drainStatus();
-    c.send({ action: 'setPlayers', count: 3, basePort });
+    c.send({ action: 'setPlayers', count: 3 });
     await c.waitFor(
       (m) => m.type === 'status' && m.state === 'listening' && m.players?.length === 3,
       { label: '3 players listening' },
@@ -163,9 +217,9 @@ describe('UDP → WebSocket pose forwarding', () => {
     // would produce wildly different (and detectable) numbers.
     const c = await newClient();
     await c.waitFor((m) => m.type === 'status', { label: 'greeting' });
-    const basePort = await freeConsecutiveUdpPorts(1);
+    const basePort = server.udpPort;
     c.drainStatus();
-    c.send({ action: 'setPlayers', count: 1, basePort });
+    c.send({ action: 'setPlayers', count: 1 });
     await c.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'listening' });
 
     const pose = {
@@ -185,5 +239,50 @@ describe('UDP → WebSocket pose forwarding', () => {
     for (const k of ['x', 'y', 'z', 'yaw', 'pitch', 'roll']) {
       assert.equal(got[k], pose[k], `field ${k} mismatched`);
     }
+  });
+});
+
+describe('ports with no pane yet', () => {
+  // Docker Desktop's UDP forwarder gives up on a published port for good once
+  // the container refuses a datagram on it. Trackers are often streaming
+  // before the page asks for their pane, so every port has to be bound from
+  // startup and quietly drop what it isn't forwarding.
+  test('every player port is bound before any client asks for players', async () => {
+    for (let i = 0; i < 4; i++) {
+      const squatter = newSender();
+      await assert.rejects(
+        new Promise((resolve, reject) => {
+          squatter.once('error', reject);
+          squatter.bind(server.udpPort + i, '127.0.0.1', resolve);
+        }),
+        { code: 'EADDRINUSE' },
+        `port ${server.udpPort + i} should already be held by the server`,
+      );
+    }
+  });
+
+  test('a datagram to an inactive player is dropped without being refused', async () => {
+    const c = await newClient();
+    await c.waitFor((m) => m.type === 'status', { label: 'greeting' });
+    c.send({ action: 'setPlayers', count: 1 });
+    await c.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'listening' });
+
+    // A connected socket surfaces the ICMP port-unreachable reply as
+    // ECONNREFUSED on its next send, which is what the forwarder reacts to.
+    const sender = newSender();
+    const errors = [];
+    sender.on('error', (err) => errors.push(err));
+    await new Promise((resolve) => sender.connect(server.udpPort + 3, '127.0.0.1', resolve));
+    const pose = packOpenTrack({ x: 1, y: 2, z: 3, yaw: 4, pitch: 5, roll: 6 });
+    for (let i = 0; i < 3; i++) {
+      await new Promise((resolve) => sender.send(pose, (err) => { if (err) errors.push(err); resolve(); }));
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.deepEqual(errors.map((e) => e.code), []);
+
+    // Player 0 still forwards, and nothing from player 3 got through.
+    await send(newSender(), server.udpPort, pose);
+    await c.waitFor((m) => m.type === 'pose', { label: 'player 0 pose' });
+    assert.deepEqual(c.messages.filter((m) => m.type === 'pose').map((m) => m.player), [0]);
   });
 });

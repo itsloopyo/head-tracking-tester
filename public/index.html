@@ -281,6 +281,24 @@
     }
     .pgrid .kv .k { color: #6b7480; min-width: 30px; }
     .pgrid .kv .v { color: #e6e8eb; overflow: hidden; text-overflow: ellipsis; }
+    .viewport .plagbig {
+      /* Clears #bottomHint, which is centred on the screen bottom and so sits
+         over the inner corner of whichever pane is bottom-left. */
+      position: absolute; right: 16px; bottom: 56px;
+      font: 600 34px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: -0.02em; color: #e6e8eb; pointer-events: none;
+      text-shadow: 0 2px 14px rgba(0, 0, 0, 0.8);
+    }
+    .viewport .plagbig.stale { opacity: 0.45; }
+    .viewport .plagbig.ref { font-size: 22px; color: #6b7480; }
+
+    .pgrid .kv.wide { grid-column: span 2; }
+    .pgrid .kv .v.stale { opacity: 0.45; }
+    /* Outranks `.pgrid .kv .v` above, which otherwise wins on specificity and
+       silently discards every setColor() call made against this grid. */
+    .pgrid .kv .v.ok { color: #79e08a; }
+    .pgrid .kv .v.warn { color: #e0c879; }
+    .pgrid .kv .v.err { color: #e07979; }
 
     .pstats .pfilter-row {
       display: flex; align-items: center; gap: 6px;
@@ -343,8 +361,8 @@
       z-index: 9;
       max-width: 80%;
       padding: 4px 16px;
-      font-size: clamp(24px, 4.4vh, 46px);
-      font-weight: 800;
+      font-size: clamp(15px, 2.4vh, 24px);
+      font-weight: 700;
       letter-spacing: 0.04em;
       color: #f2f4f7;
       text-align: center;
@@ -371,8 +389,8 @@
       box-shadow: 0 0 0 3px rgba(47, 125, 217, 0.25);
     }
     /* In 3- and 4-pane layouts, scale the name down a bit so it doesn't dominate */
-    #grid.g3 .pname { font-size: clamp(20px, 3.6vh, 36px); }
-    #grid.g4 .pname { font-size: clamp(18px, 3.2vh, 32px); bottom: 44px; }
+    #grid.g3 .pname { font-size: clamp(14px, 2.1vh, 20px); }
+    #grid.g4 .pname { font-size: clamp(13px, 1.9vh, 18px); bottom: 44px; }
   </style>
 </head>
 <body>
@@ -441,6 +459,7 @@
         <div class="label">Look forward, then press <b>SPACE</b> to center</div>
       </div>
       <div class="pname" contenteditable="true" spellcheck="false" title="Click to rename"></div>
+      <div class="plagbig" title="Median of every confident lag reading taken since this pane started, which is the figure to trust over any single one"></div>
       <div class="pstats">
         <div class="phead">
           <span class="ptitle">P?</span>
@@ -475,6 +494,7 @@
           <div class="kv"><span class="k">σ(Δ)</span><span class="v tSig">—</span></div>
           <div class="kv"><span class="k">pkΔ</span><span class="v tPeak">—</span></div>
           <div class="kv"><span class="k">rng</span><span class="v tRange">—</span></div>
+          <div class="kv wide" title="lag behind the reference pane, from rotation cross-correlation over the last 2.5s · r is the peak correlation · needs head motion, so a dimmed value is the last confident reading and how long ago it was taken"><span class="k">lag</span><span class="v tLag">—</span></div>
         </div>
         <div class="graph-row">
           <span class="k">rate</span>

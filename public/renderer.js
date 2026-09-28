@@ -240,6 +240,123 @@ class PoseInterpolator {
     ];
   }
 }
+
+// ---- Stamped delay-line reconstruction ----
+// headcam appends its send time to each packet (56-byte extension, `st` on the
+// pose message). Rebuilding the pose stream on that timeline makes delivery
+// jitter - WiFi clumping, server/WS batching, sender timer stalls - invisible:
+// a packet's values are exact for its send time no matter when it arrived.
+// Playback runs one wire interval (+ measured delivery jitter) behind the
+// newest packet, interpolating with a causal C1 Hermite: each knot's tangent
+// is the chord slope of the segment ending there, so velocity is continuous
+// and a new packet never rewrites a tangent a rendered frame already used.
+// The snap-and-extrapolate PoseInterpolator above stays as the fallback for
+// unstamped senders.
+class StampedReconstructor {
+  constructor() {
+    this.buf = [];    // { t: send time (s), v: [yaw,pitch,roll,x,y,z] }, angles unwrapped
+    this.jit = [];    // arrival - send (s), sliding window
+    this.gaps = [];   // send-time gaps (s), sliding window
+    this.off = null;  // min-tracked receiver-sender clock offset
+    this.D = null;    // playback delay (s)
+  }
+  reset() {
+    this.buf.length = 0; this.jit.length = 0; this.gaps.length = 0;
+    this.off = null; this.D = null;
+  }
+  get live() { return this.buf.length >= 2 && this.gaps.length > 0; }
+  ingest(m, arrivalMs) {
+    const st = m.st, at = arrivalMs / 1000;
+    if (!Number.isFinite(st)) return; // junk trailer from a non-headcam sender
+    let last = this.buf[this.buf.length - 1];
+    if (last && st < last.t - 1.0) {
+      // Send clock jumped backward by more than any reordering can explain:
+      // the sender restarted (BOOTTIME reset) or a different device took
+      // over. Without this, every future packet fails the stale check and
+      // the pose freezes forever while the stream reads live.
+      this.reset();
+      last = undefined;
+    }
+    if (last && st <= last.t) return;
+    if (last && st - last.t < 0.002) {
+      // Burst twin (sender catch-up tick): same playback slot, newer values.
+      // A sub-2ms Hermite segment would put a velocity spike on the tangents.
+      last.v = this._values(m, this.buf[this.buf.length - 2]);
+      last.t = st;
+      return;
+    }
+    this.buf.push({ t: st, v: this._values(m, last) });
+    if (this.buf.length > 32) this.buf.shift();
+    this.jit.push(at - st);
+    if (this.jit.length > 240) this.jit.shift();
+    // Clock offset: take a new minimum instantly (a genuinely faster
+    // delivery), but follow a RISING window-min slowly - stepping it would
+    // jump the playback point backward and replay a slice of motion.
+    const winMin = Math.min(...this.jit);
+    if (this.off === null || winMin < this.off) this.off = winMin;
+    else this.off += Math.min(winMin - this.off, 0.0002);
+    if (last) {
+      const gap = st - last.t;
+      // A long gap is an outage (tracking loss, stream start), not cadence.
+      // One 500ms warm-up gap in the window used to hold the playback delay
+      // at ~500ms for minutes - the "dragging through treacle" bug.
+      if (gap < 0.15) {
+        this.gaps.push(gap);
+        if (this.gaps.length > 240) this.gaps.shift();
+      }
+    }
+  }
+  _values(m, prev) {
+    if (!prev) return [m.yaw, m.pitch, m.roll, m.x, m.y, m.z];
+    const wrapTo = (v, ref) => {
+      let d = (v - ref) % 360;
+      if (d > 180) d -= 360; if (d < -180) d += 360;
+      return ref + d;
+    };
+    const p = prev.v;
+    return [wrapTo(m.yaw, p[0]), wrapTo(m.pitch, p[1]), wrapTo(m.roll, p[2]), m.x, m.y, m.z];
+  }
+  // One call per rendered frame - it advances the delay slew.
+  sample(nowMs, dt) {
+    if (!this.live) return null;
+    const q = (arr, f) => {
+      const s = arr.slice().sort((a, b) => a - b);
+      return s[Math.min(s.length - 1, Math.floor(f * s.length))];
+    };
+    // Delay = the p99 send gap (the bracketing segment must exist even across
+    // a sender timer stall - p90 left stall-length holes that snapped) plus
+    // the p95 delivery jitter, with a small safety margin. The TOTAL is
+    // capped at 150ms - a pathological estimate must cost occasional holds,
+    // never standing lag. Raised fast (underruns snap), lowered at 2% of
+    // real time (imperceptible warp, drains an inflated estimate in seconds,
+    // not the minutes the old 0.2%/s took) and only outside a deadband
+    // (slewing the delay warps the playback timeline).
+    const target = Math.min((q(this.jit, 0.95) - this.off) + q(this.gaps, 0.99) + 0.004, 0.15);
+    if (this.D === null) this.D = target;
+    else if (target > this.D + 0.002) this.D = Math.min(target, this.D + 0.25 * dt);
+    else if (target < this.D - 0.002) this.D = Math.max(target, this.D - 0.02 * dt);
+    const ts = (nowMs / 1000 - this.off) - this.D;
+    const buf = this.buf;
+    if (ts >= buf[buf.length - 1].t) return buf[buf.length - 1].v;
+    if (ts <= buf[0].t) return buf[0].v;
+    let hi = 1;
+    while (buf[hi].t < ts) hi++;
+    const k1 = buf[hi - 1], k2 = buf[hi];
+    const h = k2.t - k1.t, s = (ts - k1.t) / h;
+    const h00 = (1 + 2 * s) * (1 - s) * (1 - s);
+    const h10 = s * (1 - s) * (1 - s);
+    const h01 = s * s * (3 - 2 * s);
+    const h11 = s * s * (s - 1);
+    const k0 = hi >= 2 ? buf[hi - 2] : null;
+    const out = new Array(6);
+    for (let c = 0; c < 6; c++) {
+      const m2 = (k2.v[c] - k1.v[c]) / h;
+      const m1 = k0 ? (k1.v[c] - k0.v[c]) / (k1.t - k0.t) : m2;
+      out[c] = h00 * k1.v[c] + h10 * h * m1 + h01 * k2.v[c] + h11 * h * m2;
+    }
+    return out;
+  }
+}
 const DEG = Math.PI / 180;
 const BASE_EYE = new THREE.Vector3(0, 1.65, -10);
 
@@ -5001,6 +5118,7 @@ class Player {
       tVel: q('.tVel'), tCam: q('.tCam'), tZero: q('.tZero'),
       tRate: q('.tRate'), tGap: q('.tGap'), tPeakGap: q('.tPeakGap'), tEff: q('.tEff'),
       tJit: q('.tJit'), tSig: q('.tSig'), tPeak: q('.tPeak'), tRange: q('.tRange'),
+      tLag: q('.tLag'), plagBig: q('.plagbig'),
       tFps: q('.tFps'), tFrame: q('.tFrame'),
       gPkt: q('.gPkt'), gFps: q('.gFps'), gGap: q('.gGap'),
     };
@@ -5061,6 +5179,7 @@ class Player {
 
     // smoothing pipeline state (shared front-end + per-filter buffers)
     this.interp = new PoseInterpolator();
+    this.recon = new StampedReconstructor();
     this.newSample = false;
     this.ema = null; this.emaHas = false;              // classic EMA
     this.euro = { x: [], dx: [], has: false };         // 1€
@@ -5093,6 +5212,10 @@ class Player {
     // stats buffers
     this.packetTs = [];
     this.poseHist = [];
+    this.lagEst = null;
+    this.lagAxes = null;
+    this.lagWhy = null;
+    this.lagSamples = [];
     this.peakDy = this.peakDp = this.peakDr = 0;
     this.peakGap = 0;
     this.prevPose = null;
@@ -5179,6 +5302,7 @@ class Player {
   resetPoseFilter() {
     this.rawUnwrapY = this.rawUnwrapP = this.rawUnwrapR = null;
     this.interp.reset();
+    this.recon.reset();
     this.newSample = false;
     this.emaHas = false;
     this.euro.has = false;
@@ -5207,6 +5331,10 @@ class Player {
   resetStats() {
     this.packetTs.length = 0;
     this.poseHist.length = 0;
+    this.lagEst = null;
+    this.lagAxes = null;
+    this.lagWhy = null;
+    this.lagSamples.length = 0;
     this.peakDy = this.peakDp = this.peakDr = 0;
     this.peakGap = 0;
     this.prevPose = null;
@@ -5274,6 +5402,11 @@ class Player {
     this.packetTs.push(now);
     if (this.packetTs.length > 240) this.packetTs.shift();
 
+    if (m.st !== undefined) this.recon.ingest(m, now);
+    // Sender stopped stamping (timestamps toggled off mid-stream): drop the
+    // reconstructor rather than letting a stale buffer outrank fresh packets.
+    else if (this.recon.buf.length) this.recon.reset();
+
     if (this.prevPose) {
       const ady = Math.abs(m.yaw - this.prevPose.yaw);
       const adp = Math.abs(m.pitch - this.prevPose.pitch);
@@ -5293,10 +5426,23 @@ class Player {
       if (rr < this.rangeRMin) this.rangeRMin = rr; if (rr > this.rangeRMax) this.rangeRMax = rr;
     }
 
-    // Time-based window so per-tracker stats cover the same wall-clock span
-    // regardless of packet rate; the count cap only guards runaway senders.
-    this.poseHist.push({ t: now, yaw: m.yaw, pitch: m.pitch, roll: m.roll, x: m.x, y: m.y, z: m.z });
-    while (this.poseHist.length > 800 || (this.poseHist.length > 2 && now - this.poseHist[0].t > 3000)) {
+    // `ct` is the server's arrival stamp, the shared clock the lag estimator
+    // measures on. A backward jump larger than any packet reordering means the
+    // host's monotonic clock restarted under us, so the buffer's two halves are
+    // on different timelines and can't be compared.
+    const prev = this.poseHist[this.poseHist.length - 1];
+    if (prev && m.rt < prev.ct - 1000) {
+      this.poseHist.length = 0;
+      this.lagEst = null;
+    }
+    // Trimmed by span on the same clock the lag window is measured on, so a
+    // 2.5s window is always inside a 3s buffer no matter the packet rate. The
+    // count cap only guards a runaway sender, and has to stay clear of the span:
+    // a 240Hz source that doubles every pose for UDP redundancy sends 480/s, and
+    // a cap that bites first would starve the window and blank the readout for
+    // good.
+    this.poseHist.push({ t: now, ct: m.rt, yaw: m.yaw, pitch: m.pitch, roll: m.roll, x: m.x, y: m.y, z: m.z });
+    while (this.poseHist.length > 4000 || (this.poseHist.length > 2 && m.rt - this.poseHist[0].ct > 3000)) {
       this.poseHist.shift();
     }
     // tPos/tRot/tZero are refreshed at 10Hz in refreshMetrics — writing them
@@ -5311,11 +5457,12 @@ class Player {
 
     if (windowMode && this.tracking && this.latestPose && this.hasRecentered) {
       const lp = this.latestPose;
+      const rec = fs.mode !== 'off' ? this.recon.sample(performance.now(), dt) : null;
       // True 1:1 head→eye offset in metres. Rotation is intentionally ignored:
       // in window mode the eye moves, the screen stays put, the frustum shears.
-      const dxRaw = (lp.x - this.zeroPose.x) * WINDOW_TRANSLATION_SCALE;
-      const dyRaw = (lp.y - this.zeroPose.y) * WINDOW_TRANSLATION_SCALE;
-      const dzRaw = (lp.z - this.zeroPose.z) * WINDOW_TRANSLATION_SCALE;
+      const dxRaw = ((rec ? rec[3] : lp.x) - this.zeroPose.x) * WINDOW_TRANSLATION_SCALE;
+      const dyRaw = ((rec ? rec[4] : lp.y) - this.zeroPose.y) * WINDOW_TRANSLATION_SCALE;
+      const dzRaw = ((rec ? rec[5] : lp.z) - this.zeroPose.z) * WINDOW_TRANSLATION_SCALE;
       let offX = windowCal.signX * dxRaw;
       let offY = windowCal.signY * dyRaw;
       let offZ = windowCal.signZ * dzRaw;
@@ -5329,6 +5476,9 @@ class Player {
       appliedWindow = true;
     } else if (this.tracking && this.latestPose && this.hasRecentered) {
       const lp = this.latestPose;
+      // Stamped sender: reconstruct all six channels on the send timeline
+      // (see StampedReconstructor). Null for unstamped senders or raw mode.
+      const rec = fs.mode !== 'off' ? this.recon.sample(performance.now(), dt) : null;
 
       // Unwrap raw rotation onto a continuous line BEFORE any further processing,
       // so a ±180 wrap on the wire doesn't trigger a huge interpolator velocity
@@ -5339,9 +5489,9 @@ class Player {
       this.rawUnwrapY = rawY; this.rawUnwrapP = rawP; this.rawUnwrapR = rawR;
 
       // raw position deltas (with our X/Z inversions)
-      const dxRaw = (lp.x - this.zeroPose.x) * TRANSLATION_SCALE;
-      const dyP   = (lp.y - this.zeroPose.y) * TRANSLATION_SCALE;
-      const dzRaw = (lp.z - this.zeroPose.z) * TRANSLATION_SCALE;
+      const dxRaw = ((rec ? rec[3] : lp.x) - this.zeroPose.x) * TRANSLATION_SCALE;
+      const dyP   = ((rec ? rec[4] : lp.y) - this.zeroPose.y) * TRANSLATION_SCALE;
+      const dzRaw = ((rec ? rec[5] : lp.z) - this.zeroPose.z) * TRANSLATION_SCALE;
       const tdx = INVERT_X ? -dxRaw : dxRaw;
       const tdz = INVERT_Z ? -dzRaw : dzRaw;
 
@@ -5349,7 +5499,7 @@ class Player {
         // ---- shared front-end: interpolator → recenter → filter ----
         const isNew = this.newSample;
         this.newSample = false;
-        const [iy, ip, ir] = this.interp.update(rawY, rawP, rawR, isNew, dt);
+        const [iy, ip, ir] = rec || this.interp.update(rawY, rawP, rawR, isNew, dt);
 
         // recenter (yaw axis inverted to match our world convention)
         let cy = -(iy - this.zeroPose.yaw);
@@ -5541,6 +5691,55 @@ class Player {
       `y${(this.camera.rotation.y / DEG).toFixed(1)} p${(this.camera.rotation.x / DEG).toFixed(1)} r${(this.camera.rotation.z / DEG).toFixed(1)}`;
 
     const hasPackets = this.packetTs.length >= 2 && tslp < 2000;
+
+    const est = hasPackets ? this.lagEst : null;
+    if (!est) {
+      u.tLag.textContent = '—';
+      setColor(u.tLag, null);
+    } else if (est.ref) {
+      u.tLag.textContent = 'ref';
+      setColor(u.tLag, null);
+    } else if (est.why) {
+      u.tLag.textContent = LAG_REASON[est.why].row;
+      setColor(u.tLag, 'warn');
+    } else {
+      const age = est.held ? ` · ${Math.max(1, Math.round((now - est.at) / 1000))}s ago` : '';
+      if (est.outOfRange) {
+        u.tLag.textContent = `beyond ${est.ahead ? '-' : '+'}${LAG_MAX_MS} ms${age}`;
+        setColor(u.tLag, est.ahead ? 'ok' : 'err');
+      } else {
+        const v = Math.round(est.lagMs);
+        u.tLag.textContent = `${v > 0 ? '+' : ''}${v} ms · r ${est.corr.toFixed(2)}${age}`;
+        setColor(u.tLag, v <= 0 ? 'ok' : classify(v, 30, 80));
+      }
+    }
+    u.tLag.classList.toggle('stale', !!(est && est.held));
+
+    // The headline figure: every confident reading this pane has taken, not the
+    // last one. Individual windows scatter with how the head happened to move;
+    // what the user wants to read off is where they settle.
+    const median = lagMedian(this.lagSamples);
+    const isRef = !!(est && est.ref);
+    if (isRef) {
+      u.plagBig.textContent = 'ref';
+    } else if (median === null) {
+      u.plagBig.textContent = '';
+    } else {
+      const v = Math.round(median);
+      u.plagBig.textContent = `${v > 0 ? '+' : ''}${v}ms`;
+    }
+    u.plagBig.classList.toggle('ref', isRef);
+    u.plagBig.classList.toggle('stale', !isRef && !!(est && est.held));
+    u.plagBig.title = median === null ? ''
+      : `median of ${this.lagSamples.length} readings`;
+    u.tLag.title = this.lagAxes
+      ? `${this.lagWhy}\n` + ['yaw', 'pitch', 'roll']
+        .map((n, c) => {
+          const ax = this.lagAxes[c];
+          return `${n} ${ax.lagMs > 0 ? '+' : ''}${ax.lagMs.toFixed(0)}ms  r ${ax.r.toFixed(2)}  motion ${(ax.share * 100).toFixed(0)}%`;
+        }).join('\n')
+      : '';
+
     this.cmp = { live: hasPackets, hz, effHz, jitter, sig: Math.max(sigY, sigP, sigR) };
     if (hasPackets) {
       u.tRate.textContent = hz.toFixed(1);
@@ -5770,6 +5969,9 @@ tick();
 // 10Hz metrics refresh for all players
 setInterval(() => {
   const now = performance.now();
+  // Before refreshMetrics so the panes render the estimate this tick produced;
+  // it gates on the previous tick's liveness, which moves on a 2s timeout.
+  updateLagEstimates(now);
   for (const p of players) p.refreshMetrics(now);
   updateComparePanel(now);
 }, 100);
@@ -5821,11 +6023,10 @@ function connect() {
         for (const p of players) p.setPort(basePort + p.index);
       }
       if (m.state === 'listening') {
-        const live = m.players || [];
+        const live = m.players.filter((info) => info.ok);
         setMasterStatus('listening', `${live.length} on :${basePort}+`);
         for (let i = 0; i < players.length; i++) {
-          const ok = live.some((info) => info.player === i && info.ok !== false);
-          players[i].setTracking(ok);
+          players[i].setTracking(live.some((info) => info.player === i));
         }
       } else if (m.state === 'stopped') {
         setMasterStatus('stopped');
@@ -5995,10 +6196,10 @@ compareToggleEl.addEventListener('click', () => {
   comparePanelEl.style.display = compareEnabled ? 'block' : 'none';
 });
 
+// Closed form rather than subtract-until-in-range: past about 1.6e18 degrees
+// subtracting 360 rounds back to the same double and the loop never ends.
 function wrapDeg180(d) {
-  while (d > 180) d -= 360;
-  while (d < -180) d += 360;
-  return d;
+  return d - 360 * Math.round(d / 360);
 }
 
 function pearson(a, b) {
@@ -6012,6 +6213,328 @@ function pearson(a, b) {
     num += va * vb; da += va * va; db += vb * vb;
   }
   return da > 0 && db > 0 ? num / Math.sqrt(da * db) : 0;
+}
+
+// ---- relative latency estimator ----
+// Rests on every tracker watching the same head, so the panes carry one signal
+// at different delays. Time is the server's UDP arrival stamp (`ct`), one clock
+// for every source, so the answer doesn't include whatever the browser did
+// between the socket and the pane.
+//
+// This measures the delay of whatever motion frequency dominates the window. For
+// a source with internal smoothing that group delay genuinely varies with how
+// fast the head is moving, so the number moves with it.
+const LAG_STEP_MS = 5;
+// Twice the worst latency any usable tracker has. A delay somewhat past the
+// search pins the peak to the edge and reads as out of range; further past it
+// the peak comes off the edge and lands inside the range instead, which is why
+// the differencing below matters as much as the width here.
+const LAG_MAX_MS = 500;
+const LAG_WINDOW_MS = 2500;
+const LAG_MIN_CORR = 0.7;
+// Channels are compared as change over this span rather than as absolute angle.
+// Position correlation is dominated by the slowest, largest component of the
+// motion, and that component is what lets a lag past the search range lock onto
+// the wrong cycle and report a small plausible number. Differencing removes it.
+// The span is the whole tuning: adjacent samples (5 ms) kill the cycle slips but
+// amplify sensor noise until a 0.2 deg tracker stops resolving at all, and past
+// ~160 ms the slow component creeps back and the slips with it. Measured across
+// slip, noise, rate-mismatch and smoothed-source cases, 80 ms is the floor of a
+// wide flat optimum.
+const LAG_DIFF_MS = 80;
+// How tall a rival peak may stand before the answer is a coin toss, and how far
+// from the peak a rival has to be to count as one. A fixed exclusion rather than
+// a walk out to the first local minimum: the walk's verdict flips on a
+// single-sample dip next to the peak, and it degenerates to no check at all on a
+// curve that falls away monotonically, which is exactly the broad shallow peak
+// most in need of one.
+// Measured, the two populations sit far apart: everything that should pass
+// (including single-axis motion and a heavily smoothed source) rivals at 0.50 or
+// below, everything that should be caught (a metronomic shake, a quarter-hertz
+// sway whose peak spans the whole search) at 0.89 or above.
+const LAG_MAX_RIVAL = 0.7;
+const LAG_RIVAL_EXCLUDE_MS = 200;
+// How far apart two axes may put the same delay before the sources are taken to
+// disagree about something other than latency, such as a swapped axis. This has
+// to clear the honest per-axis spread first: a heavily smoothed tracker filters
+// each axis separately, so its group delay genuinely differs between them by
+// tens of ms, and a tolerance tight enough to look precise vetoes every reading
+// taken against one. Only axes that moved at least a tenth as much as the
+// busiest one get a vote, since an axis carrying nothing but dither peaks
+// wherever its noise does.
+const LAG_CHANNEL_TOL_MS = 120;
+const LAG_CHANNEL_MIN_SHARE = 0.1;
+// A hole this big can only be interpolated by inventing motion that never
+// happened, and enough invented motion drags the peak. Reject the window.
+const LAG_MAX_HOLE_MS = 250;
+// Both refusals the user can do something about. 'ambiguous' covers rhythmic
+// motion and motion too slow to put a peak anywhere in particular, and the
+// wording has to fit both.
+const LAG_REASON = {
+  ambiguous: { row: 'vary the motion more', cell: 'unclear' },
+  disagree: { row: 'axes disagree', cell: 'axes differ' },
+};
+
+function resampleRotation(hist, t0, t1, stepMs) {
+  const len = hist.length;
+  if (len < 8) return null;
+  if (hist[0].ct > t0 || hist[len - 1].ct < t1) return null;
+
+  const src = [new Float64Array(len), new Float64Array(len), new Float64Array(len)];
+  src[0][0] = hist[0].yaw; src[1][0] = hist[0].pitch; src[2][0] = hist[0].roll;
+  for (let i = 1; i < len; i++) {
+    src[0][i] = src[0][i - 1] + wrapDeg180(hist[i].yaw - hist[i - 1].yaw);
+    src[1][i] = src[1][i - 1] + wrapDeg180(hist[i].pitch - hist[i - 1].pitch);
+    src[2][i] = src[2][i - 1] + wrapDeg180(hist[i].roll - hist[i - 1].roll);
+  }
+
+  const n = Math.floor((t1 - t0) / stepMs) + 1;
+  const grid = [new Float64Array(n), new Float64Array(n), new Float64Array(n)];
+  let j = 0;
+  for (let k = 0; k < n; k++) {
+    const t = t0 + k * stepMs;
+    while (j < len - 2 && hist[j + 1].ct < t) j++;
+    const span = hist[j + 1].ct - hist[j].ct;
+    if (span > LAG_MAX_HOLE_MS) return null;
+    const f = span > 0 ? Math.min(1, Math.max(0, (t - hist[j].ct) / span)) : 0;
+    for (let c = 0; c < 3; c++) grid[c][k] = src[c][j] + (src[c][j + 1] - src[c][j]) * f;
+  }
+
+  const d = Math.round(LAG_DIFF_MS / stepMs);
+  const nd = n - d;
+  const ch = [new Float64Array(nd), new Float64Array(nd), new Float64Array(nd)];
+  const sd = [0, 0, 0];
+  for (let c = 0; c < 3; c++) {
+    const a = ch[c], g = grid[c];
+    let sum = 0;
+    for (let i = 0; i < nd; i++) { a[i] = g[i + d] - g[i]; sum += a[i]; }
+    const mean = sum / nd;
+    let sq = 0;
+    for (let i = 0; i < nd; i++) { a[i] -= mean; sq += a[i] * a[i]; }
+    sd[c] = Math.sqrt(sq / nd);
+  }
+  return { ch, sd };
+}
+
+// Holding the comparison length constant across lags keeps every lag scored on
+// the same amount of data, so a peak is not competing against samples its rivals
+// never saw.
+//
+// Sums are taken as deviations from each segment's own mean. The closed form
+// sum(x^2) - sum(x)^2/m is a pass cheaper, but on a window the head barely moved
+// through, its two terms agree to within their own rounding error and the
+// difference comes out as arbitrary noise: variances near zero, correlations
+// above 1, and a confident lag drawn from whichever way the error fell.
+//
+// Index i of the result is lag (i - maxK); positive means b trails a.
+function corrCurve(a, b, maxK) {
+  const m = a.length - 2 * maxK;
+  const out = new Float64Array(2 * maxK + 1);
+
+  let sb = 0;
+  for (let i = 0; i < m; i++) sb += b[maxK + i];
+  const mb = sb / m;
+  const bc = new Float64Array(m);
+  let normB = 0;
+  for (let i = 0; i < m; i++) {
+    bc[i] = b[maxK + i] - mb;
+    normB += bc[i] * bc[i];
+  }
+  if (normB <= 0) return out;
+  normB = Math.sqrt(normB);
+
+  for (let k = -maxK; k <= maxK; k++) {
+    const off = maxK - k;
+    let sa = 0;
+    for (let i = 0; i < m; i++) sa += a[off + i];
+    const ma = sa / m;
+    let normA = 0, dot = 0;
+    for (let i = 0; i < m; i++) {
+      const d = a[off + i] - ma;
+      normA += d * d;
+      dot += d * bc[i];
+    }
+    if (normA > 0) out[k + maxK] = dot / (Math.sqrt(normA) * normB);
+  }
+  return out;
+}
+
+function computeLagMs(refHist, hist) {
+  if (!refHist.length || !hist.length) return { status: 'nodata' };
+  const t1 = Math.min(refHist[refHist.length - 1].ct, hist[hist.length - 1].ct);
+  const t0 = t1 - LAG_WINDOW_MS;
+  const a = resampleRotation(refHist, t0, t1, LAG_STEP_MS);
+  if (!a) return { status: 'nodata' };
+  const b = resampleRotation(hist, t0, t1, LAG_STEP_MS);
+  if (!b) return { status: 'nodata' };
+
+  const maxK = Math.round(LAG_MAX_MS / LAG_STEP_MS);
+  const width = 2 * maxK + 1;
+  const curves = [], weights = [], signs = [], peakAt = [], moved = [];
+  let wSum = 0;
+  for (let c = 0; c < 3; c++) {
+    const curve = corrCurve(a.ch[c], b.ch[c], maxK);
+    let peak = 0, peakAbs = 0, peakI = 0;
+    for (let i = 0; i < width; i++) {
+      const abs = Math.abs(curve[i]);
+      if (abs > peakAbs) { peakAbs = abs; peak = curve[i]; peakI = i; }
+    }
+    peakAt.push(peakI);
+    // A channel earns its say from how far both sources moved in it and how
+    // well they agree at all: noise has motion but no agreement, and an axis a
+    // sender leaves at zero has neither. A negative peak means the axis is
+    // inverted, a convention difference rather than a disagreement.
+    const sd = Math.min(a.sd[c], b.sd[c]);
+    const w = sd * peakAbs;
+    curves.push(curve); weights.push(w); signs.push(peak < 0 ? -1 : 1); moved.push(sd);
+    wSum += w;
+  }
+  // Per-axis working, so a pane that refuses can say which axis disagreed with
+  // which and at what confidence. Without it every refusal looks the same from
+  // the outside and there is no way to tell a broken tracker from a tuning
+  // threshold that is too tight for real hardware.
+  const axes = [0, 1, 2].map((c) => ({
+    lagMs: (peakAt[c] - maxK) * LAG_STEP_MS,
+    r: Math.abs(curves[c][peakAt[c]]),
+    share: wSum > 0 ? moved[c] / Math.max(moved[0], moved[1], moved[2]) : 0,
+  }));
+  if (wSum <= 0) return { status: 'weak', axes };
+
+  // Only axes that moved a reasonable share of the busiest one are candidates:
+  // one carrying nothing but dither peaks wherever its noise does.
+  const busiest = Math.max(moved[0], moved[1], moved[2]);
+  const candidates = [0, 1, 2].filter((c) => moved[c] >= LAG_CHANNEL_MIN_SHARE * busiest && weights[c] > 0);
+  if (!candidates.length) return { status: 'weak', axes };
+
+  // Summing the candidates would average whatever they each say, so one axis
+  // the two trackers handle differently drags the total to a lag none of them
+  // measured, and it pulls hardest precisely when it is the one that is wrong.
+  // Take the largest group that agrees among themselves instead and drop the
+  // rest: a dissenting axis then costs its own contribution rather than the
+  // whole reading. The tolerance has to be loose enough for the honest spread
+  // between axes of a smoothed tracker, which is why excluding beats averaging.
+  const tol = Math.round(LAG_CHANNEL_TOL_MS / LAG_STEP_MS);
+  let voting = [];
+  for (const c of candidates) {
+    const group = candidates.filter((o) => Math.abs(peakAt[o] - peakAt[c]) <= tol);
+    let groupMotion = 0;
+    for (const o of group) groupMotion += moved[o];
+    let votingMotion = 0;
+    for (const o of voting) votingMotion += moved[o];
+    if (group.length > voting.length
+      || (group.length === voting.length && groupMotion > votingMotion)) voting = group;
+  }
+  // Nobody agrees with anybody: the panes are not describing the same motion.
+  if (voting.length === 1 && candidates.length > 1) return { status: 'disagree', axes };
+
+  let vSum = 0;
+  for (const c of voting) vSum += weights[c];
+  if (vSum <= 0) return { status: 'weak', axes };
+
+  const comb = new Float64Array(width);
+  let best = -Infinity, bestI = 0;
+  for (let i = 0; i < width; i++) {
+    let v = 0;
+    for (const c of voting) v += weights[c] * signs[c] * curves[c][i];
+    v /= vSum;
+    comb[i] = v;
+    if (v > best) { best = v; bestI = i; }
+  }
+  if (best < LAG_MIN_CORR) return { status: 'weak', corr: best, axes };
+
+  // Rhythmic motion correlates just as well a whole period away, and a peak too
+  // broad to localise has the same signature: something far from the peak stands
+  // nearly as tall. Either way the millisecond being reported is a coin toss.
+  // Checked before the edge test below, because a curve with equal rivals gives
+  // no grounds for the positive claim that the source is out of range either.
+  const exclude = Math.round(LAG_RIVAL_EXCLUDE_MS / LAG_STEP_MS);
+  let rival = -Infinity;
+  for (let i = 0; i < width; i++) {
+    if (Math.abs(i - bestI) > exclude && comb[i] > rival) rival = comb[i];
+  }
+  if (rival > best * LAG_MAX_RIVAL) return { status: 'ambiguous', corr: best, axes };
+
+  if (bestI === 0) return { status: 'range', ahead: true, axes };
+  if (bestI === width - 1) return { status: 'range', ahead: false, axes };
+
+  // A non-negative second difference is not a maximum, so there is nothing to
+  // refine and the grid peak stands.
+  const yl = comb[bestI - 1], yr = comb[bestI + 1];
+  const denom = yl - 2 * best + yr;
+  const delta = denom < 0 ? (0.5 * (yl - yr)) / denom : 0;
+  return {
+    status: 'ok',
+    lagMs: (bestI - maxK + delta) * LAG_STEP_MS,
+    corr: best,
+    axes,
+  };
+}
+
+// Median rather than mean of the readings captured so far. Any single window
+// can be dragged by an axis the two trackers handle differently, or by a burst
+// of motion that suits one of them; the median ignores a minority of those
+// outright, where a mean quietly folds them in.
+function lagMedian(samples) {
+  if (!samples.length) return null;
+  const s = Float64Array.from(samples).sort();
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+let lagRefIndex = null;
+let lagTick = 0;
+function updateLagEstimates(now) {
+  // A 2.5s window has nothing new to say at 10Hz, and the correlation is the
+  // one genuinely expensive thing on the metrics tick.
+  if (lagTick++ % 3) return;
+  const ref = players.find((p) => p.cmp && p.cmp.live) || null;
+  const refIndex = ref ? ref.index : null;
+  if (refIndex !== lagRefIndex) {
+    // Held numbers were measured against the pane that just went away, so they
+    // describe a comparison nobody is looking at any more.
+    for (const p of players) { p.lagEst = null; p.lagSamples.length = 0; }
+    lagRefIndex = refIndex;
+  }
+  for (const p of players) {
+    if (!ref || !p.cmp || !p.cmp.live) { p.lagEst = null; continue; }
+    if (p === ref) { p.lagEst = { ref: true }; continue; }
+    const res = computeLagMs(ref.poseHist, p.poseHist);
+    // Kept apart from lagEst: this is what the axes are doing right now, which
+    // is the thing worth seeing when the row is refusing rather than reporting.
+    p.lagAxes = res.axes || null;
+    p.lagWhy = res.status;
+    if (res.status === 'ok') {
+      p.lagEst = { lagMs: res.lagMs, corr: res.corr, at: now, held: false };
+      p.lagSamples.push(res.lagMs);
+      if (p.lagSamples.length > 600) p.lagSamples.shift();
+    }
+    else if (res.status === 'range') p.lagEst = { outOfRange: true, ahead: res.ahead, at: now, held: false };
+    // No confident answer this tick (a still head correlates with everything).
+    // Keep the last measurement and let its age say how long ago it was true,
+    // rather than blanking the row every time the user stops moving. Only a
+    // measurement is worth holding; a previous tick's refusal is not.
+    // 'disagree' is not a failure to measure, it is the finding that the two
+    // panes stopped describing the same thing, so the held number is describing
+    // a comparison that no longer exists. Every other refusal keeps it.
+    else if (res.status !== 'disagree'
+      && p.lagEst && (p.lagEst.lagMs !== undefined || p.lagEst.outOfRange)) p.lagEst.held = true;
+    // With nothing to hold, a refusal the user can act on beats a dash. 'weak'
+    // stays blank: it only means move more, which a blank row already implies.
+    else if (res.status === 'ambiguous' || res.status === 'disagree') p.lagEst = { why: res.status };
+    else p.lagEst = null;
+  }
+}
+
+// Fresh readings stay numbers so the row can still rank on them; a held one
+// becomes a string carrying its age, which drops it out of the ranking.
+function lagCell(est, now) {
+  if (!est) return null;
+  if (est.ref) return 'ref';
+  if (est.why) return LAG_REASON[est.why].cell;
+  const age = est.held ? ` (${Math.max(1, Math.round((now - est.at) / 1000))}s)` : '';
+  if (est.outOfRange) return `${est.ahead ? '<-' : '>+'}${LAG_MAX_MS}${age}`;
+  const v = Math.round(est.lagMs);
+  return est.held ? `${v}${age}` : v;
 }
 
 // Wire-signal quality over the pose buffer. Duplicate packets (some senders
@@ -6060,51 +6583,6 @@ function poseSignalStats(p) {
   };
 }
 
-// Resample a pane's unwrapped yaw onto a uniform grid for cross-correlation.
-function sampleYaw(p, t0, t1, stepMs) {
-  const h = p.poseHist;
-  if (h.length < 8 || h[0].t > t0 + 200 || h[h.length - 1].t < t1 - 200) return null;
-  const unwrapped = new Array(h.length);
-  unwrapped[0] = h[0].yaw;
-  for (let i = 1; i < h.length; i++) unwrapped[i] = unwrapped[i - 1] + wrapDeg180(h[i].yaw - h[i - 1].yaw);
-  const out = [];
-  let j = 0;
-  for (let t = t0; t <= t1; t += stepMs) {
-    while (j < h.length - 2 && h[j + 1].t < t) j++;
-    const a = h[j], b = h[Math.min(j + 1, h.length - 1)];
-    const span = b.t - a.t;
-    const f = span > 0 ? Math.min(1, Math.max(0, (t - a.t) / span)) : 0;
-    out.push(unwrapped[j] + (unwrapped[Math.min(j + 1, h.length - 1)] - unwrapped[j]) * f);
-  }
-  return out;
-}
-
-// Relative latency vs the reference pane: the lag (+ = behind) that maximizes
-// yaw cross-correlation over the last ~2.5s. Needs real motion — flat signals
-// correlate with everything, so weak peaks return null and display as '—'.
-function computeLagMs(ref, p, now) {
-  const STEP = 5, MAXLAG = 300;
-  if (!ref.poseHist.length || !p.poseHist.length) return null;
-  const t0 = Math.max(now - 2500, ref.poseHist[0].t, p.poseHist[0].t);
-  if (now - t0 < 1200) return null;
-  const a = sampleYaw(ref, t0, now, STEP);
-  const b = sampleYaw(p, t0, now, STEP);
-  if (!a || !b) return null;
-  const n = Math.min(a.length, b.length);
-  const maxK = Math.floor(MAXLAG / STEP);
-  let bestCorr = -2, bestK = 0;
-  for (let k = -maxK; k <= maxK; k++) {
-    const lo = Math.max(0, k), hi = Math.min(n, n + k);
-    if (hi - lo < 100) continue;
-    const sa = [], sb = [];
-    for (let i = lo; i < hi; i++) { sa.push(a[i - k]); sb.push(b[i]); }
-    const c = pearson(sa, sb);
-    if (c > bestCorr) { bestCorr = c; bestK = k; }
-  }
-  if (bestCorr < 0.7) return null;
-  return bestK * STEP;
-}
-
 const CMP_ROWS = [
   // no ranking: duplicate-padding inflates wire rate; eff is the honest cadence
   { key: 'hz',      label: 'rate Hz',   better: null,   eps: 1,    fmt: (v) => v.toFixed(1) },
@@ -6141,18 +6619,12 @@ function updateComparePanel(now) {
         revPct: stats ? stats.revPct : null,
         maxStep: stats ? stats.maxStep : null,
         xtalk: stats ? stats.xtalk : null,
-        lagMs: null,
+        lagMs: lagCell(p.lagEst, now),
       } : null,
     };
   });
 
-  const ref = cols.find((c) => c.live);
-  if (ref) {
-    for (const c of cols) {
-      if (!c.live) continue;
-      c.vals.lagMs = c === ref ? 'ref' : computeLagMs(ref.p, c.p, now);
-    }
-  }
+  const ref = cols.find((c) => c.p.lagEst && c.p.lagEst.ref);
 
   let html = '<table><tr><th>vs</th>';
   for (const c of cols) {
@@ -6177,8 +6649,8 @@ function updateComparePanel(now) {
       const v = c.vals ? c.vals[row.key] : null;
       if (v === null || v === undefined) {
         html += `<td${c.live ? '' : ' class="idlecol"'}>—</td>`;
-      } else if (v === 'ref') {
-        html += '<td>ref</td>';
+      } else if (typeof v === 'string') {
+        html += `<td>${escapeHtml(v)}</td>`;
       } else {
         const cls = v === best ? ' class="best"' : v === worst ? ' class="worst"' : '';
         html += `<td${cls}>${row.fmt(v)}</td>`;

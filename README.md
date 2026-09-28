@@ -25,7 +25,8 @@ docker run --rm --name htt \
   itsloopyo/head-tracking-tester
 ```
 
-Open <http://localhost:8080>. Listeners bind automatically, so pick 1 to 4 players in the
+Open <http://localhost:8080>. All four UDP ports are bound as soon as the server starts, so
+trackers can start sending before the page is open. Pick 1 to 4 players in the
 toolbar and each pane takes one consecutive UDP port from `4242` up. Point OpenTrack at
 UDP `4242`.
 
@@ -83,7 +84,7 @@ Anything that speaks that format works; nothing here is OpenTrack-specific.
 | **Shift** | Run |
 | Mouse drag | Orbit the camera when a pane isn't tracking |
 | Click a pane's name | Rename it (persists in `localStorage`) |
-| **players 1-4** | Split the view; each pane binds the next UDP port |
+| **players 1-4** | Split the view; each pane shows the next UDP port |
 | **scene** / **cycle** | Pick a scene, or rotate through all of them every N seconds |
 | **smoothing** | Filter mode plus a responsive-to-smooth dial; **advanced** exposes raw parameters |
 | **compare** | Live signal-quality scoreboard across panes |
@@ -124,9 +125,34 @@ per row. Run two trackers off the same head at once and the differences are imme
 | `pk step °` | Largest single-packet jump. Spikes show up here before you feel them |
 | `σΔ °` | Noise floor |
 | `xtalk \|r\|` | Correlation between translation and rotation deltas, so how much a solver leaks one into the other. Unranked, because noise dilutes the correlation and can flatter a noisy tracker |
-| `lag ms` | Lag against the reference pane, from peak yaw cross-correlation. Needs real head motion; a flat signal correlates with everything and shows a dash |
+| `lag ms` | Lag against the reference pane. The same estimate the per-pane `lag` row shows |
 
 The scoreboard assumes every tracker is following the same head.
+
+### Relative latency
+
+Every pane shows how far behind the reference pane its tracker is, in milliseconds,
+alongside the peak correlation the number came from. The reference is the first live
+pane and reads `ref`. The measurement is relative only: it gives you the gap between
+two trackers, and says nothing about either one's absolute latency.
+
+It works by cross-correlating all three rotation axes over the last 2.5 seconds,
+timed on the server's UDP arrival stamps so that one clock covers every source.
+Inverted axes are handled, and the peak is fitted between grid points, so the
+resolution is about a millisecond rather than the 5 ms sampling grid.
+
+It needs real head motion, and where it cannot measure it says so:
+
+- **Stops moving.** The last confident reading is held, dimmed, with its age. Read
+  it as what was true when it was taken.
+- **Metronomic or very slow motion.** A steady head shake correlates just as well a
+  whole period away, and a quarter-hertz sway barely turns over inside the search
+  range at all. Either way several lags fit equally well, so the pane asks you to
+  vary the motion more.
+- **Axes that disagree.** If the two best-moving axes put the delay in different
+  places, the sources differ by more than latency, and no single number describes it.
+- **Beyond ±500 ms.** Reported as out of range, with the direction it ran off in.
+  Nothing past the search range gets a number.
 
 ## Configuration
 

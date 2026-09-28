@@ -139,19 +139,19 @@ try {
   const client = openWebSocket(`ws://127.0.0.1:${httpPort}`);
   await client.ready;
   await client.waitFor((m) => m.type === 'status', 5_000, 'initial status');
-  // No basePort, exactly like the page: the server uses its own UDP_PORT.
+  // Exactly what the page sends on connect.
   client.send({ action: 'setPlayers', count: 1 });
   await client.waitFor(
     (m) => m.type === 'status' && m.state === 'listening',
     5_000,
     'listening status after setPlayers',
   );
-  console.log('[smoke] websocket control channel bound the UDP listener');
+  console.log('[smoke] websocket control channel started forwarding player 0');
 
   const sender = dgram.createSocket('udp4');
   const packet = openTrackPacket([1.5, -2.5, 3.5, 10.25, -20.5, 30.75]);
   const poseSeen = client.waitFor((m) => m.type === 'pose', POSE_TIMEOUT_MS, 'a forwarded pose');
-  // Datagrams sent before the listener is fully wired are simply lost, so
+  // A datagram lost on the way in is not an error for this check, so
   // keep re-sending until one comes back through the WebSocket.
   const pump = setInterval(() => sender.send(packet, udpPort, '127.0.0.1'), 100);
   let pose;

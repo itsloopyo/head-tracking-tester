@@ -6,6 +6,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { freeConsecutiveUdpPorts } from './free-ports.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_JS = path.resolve(__dirname, '..', '..', 'server.js');
@@ -13,14 +14,17 @@ const SERVER_JS = path.resolve(__dirname, '..', '..', 'server.js');
 const READY_TIMEOUT_MS = 5000;
 const SHUTDOWN_TIMEOUT_MS = 2000;
 
+// The server binds all four player ports at startup, so each instance gets
+// its own free range unless the test pins one.
 export async function startServer({ httpPort, udpPort } = {}) {
   if (!httpPort) throw new Error('startServer requires httpPort');
+  udpPort ??= await freeConsecutiveUdpPorts(4);
 
   const env = {
     ...process.env,
     HTTP_PORT: String(httpPort),
+    UDP_PORT: String(udpPort),
   };
-  if (udpPort !== undefined) env.UDP_PORT = String(udpPort);
 
   const child = spawn(process.execPath, [SERVER_JS], {
     env,

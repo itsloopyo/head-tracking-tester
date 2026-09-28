@@ -36,6 +36,9 @@ function load() {
   // Block 2: unwrapDeg, classify, classifyLow. Stops before setColor,
   // which touches the DOM.
   const block2 = slice(src, 'function unwrapDeg', 'function setColor');
+  // Block 3: wrapDeg180, pearson and the relative-latency estimator. Stops
+  // before updateLagEstimates, which reaches for the live `players` array.
+  const block3 = slice(src, 'function wrapDeg180', 'function updateLagEstimates');
 
   // We use vm.runInThisContext (not a fresh context) so that arrays /
   // objects created inside the snippet share Array.prototype with the
@@ -46,11 +49,14 @@ function load() {
   const code = `(function () {
     ${block1}
     ${block2}
+    ${block3}
     return {
       obraDinnAlpha, applyDeadzone, PoseInterpolator,
       oneEuroLowpassAlpha, oneEuroStep, accelaStep,
       euroParamsFromAmount, accelaSmoothingFromAmount,
       unwrapDeg, classify, classifyLow,
+      resampleRotation, corrCurve, computeLagMs, lagMedian,
+      LAG_STEP_MS, LAG_MAX_MS, LAG_WINDOW_MS, LAG_DIFF_MS, LAG_CHANNEL_TOL_MS,
     };
   })()`;
 
@@ -69,4 +75,13 @@ export const {
   unwrapDeg,
   classify,
   classifyLow,
+  resampleRotation,
+  corrCurve,
+  computeLagMs,
+  lagMedian,
+  LAG_STEP_MS,
+  LAG_MAX_MS,
+  LAG_WINDOW_MS,
+  LAG_DIFF_MS,
+  LAG_CHANNEL_TOL_MS,
 } = load();

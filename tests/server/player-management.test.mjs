@@ -2,25 +2,24 @@
 //
 // Exercises the bookkeeping logic in server.js:
 //   - count clamping to [1, MAX_PLAYERS=4] and integer truncation
-//   - basePort fallback when 0 / negative / non-numeric
+//   - players are reported on UDP_PORT + index
 //   - describePlayers result (player + port, sorted)
-//   - setPlayers tears down existing sockets before rebinding
-//   - bind-error broadcast when the requested port is already in use
+//   - stop and a smaller count stop forwarding without releasing ports
+//   - a port that fails to bind is reported per player and retried
 
 import { test, before, after, afterEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import dgram from 'node:dgram';
 import { startServer } from '../helpers/server-harness.mjs';
-import { freeTcpPort, freeUdpPort, freeConsecutiveUdpPorts } from '../helpers/free-ports.mjs';
+import { freeTcpPort, freeConsecutiveUdpPorts } from '../helpers/free-ports.mjs';
 import { createClient } from '../helpers/ws-client.mjs';
 
 let server;
-let defaultUdpPort;
 const openClients = new Set();
 const sideSockets = new Set();
 
-async function newClient() {
-  const c = createClient(server.wsUrl);
+async function newClient(target = server) {
+  const c = createClient(target.wsUrl);
   openClients.add(c);
   await c.connected();
   await c.waitFor((m) => m.type === 'status', { label: 'greeting' });
@@ -28,13 +27,34 @@ async function newClient() {
   return c;
 }
 
+function newSocket() {
+  const sock = dgram.createSocket('udp4');
+  sideSockets.add(sock);
+  return sock;
+}
+
+function bind(sock, port) {
+  return new Promise((resolve, reject) => {
+    sock.once('error', reject);
+    sock.bind(port, '127.0.0.1', resolve);
+  });
+}
+
+function pose(x) {
+  const buf = Buffer.alloc(48);
+  buf.writeDoubleLE(x, 0);
+  return buf;
+}
+
+function send(port, buf) {
+  return new Promise((resolve, reject) => {
+    newSocket().send(buf, port, '127.0.0.1', (err) => (err ? reject(err) : resolve()));
+  });
+}
+
 before(async () => {
   const httpPort = await freeTcpPort();
-  // Pre-allocate a free UDP port the server will keep as its default
-  // base port, so basePort-fallback tests don't collide with whatever
-  // is running on 4242 on the host machine.
-  defaultUdpPort = await freeConsecutiveUdpPorts(4);
-  server = await startServer({ httpPort, udpPort: defaultUdpPort });
+  server = await startServer({ httpPort });
 });
 after(async () => { if (server) await server.stop(); });
 
@@ -55,31 +75,27 @@ afterEach(async () => {
 describe('setPlayers: count clamping', () => {
   test('count > MAX_PLAYERS is clamped to 4', async () => {
     const c = await newClient();
-    const basePort = await freeConsecutiveUdpPorts(4);
-    c.send({ action: 'setPlayers', count: 9, basePort });
+    c.send({ action: 'setPlayers', count: 9 });
     const msg = await c.waitFor(
       (m) => m.type === 'status' && m.state === 'listening' && m.players?.length === 4,
       { label: 'clamped to 4' },
     );
-    assert.equal(msg.players.length, 4);
     assert.deepEqual(msg.players.map((p) => p.player), [0, 1, 2, 3]);
   });
 
   test('count < 1 is clamped to 1', async () => {
     const c = await newClient();
-    const basePort = await freeConsecutiveUdpPorts(1);
-    c.send({ action: 'setPlayers', count: 0, basePort });
+    c.send({ action: 'setPlayers', count: 0 });
     const msg = await c.waitFor(
-      (m) => m.type === 'status' && m.state === 'listening' && m.players?.length === 1,
+      (m) => m.type === 'status' && m.state === 'listening',
       { label: 'clamped to 1' },
     );
-    assert.deepEqual(msg.players, [{ player: 0, port: basePort, ok: true }]);
+    assert.deepEqual(msg.players, [{ player: 0, port: server.udpPort, ok: true }]);
   });
 
   test('negative count is clamped to 1', async () => {
     const c = await newClient();
-    const basePort = await freeConsecutiveUdpPorts(1);
-    c.send({ action: 'setPlayers', count: -42, basePort });
+    c.send({ action: 'setPlayers', count: -42 });
     const msg = await c.waitFor(
       (m) => m.type === 'status' && m.state === 'listening',
       { label: 'negative clamped' },
@@ -89,8 +105,7 @@ describe('setPlayers: count clamping', () => {
 
   test('fractional count is truncated via | 0', async () => {
     const c = await newClient();
-    const basePort = await freeConsecutiveUdpPorts(2);
-    c.send({ action: 'setPlayers', count: 2.9, basePort });
+    c.send({ action: 'setPlayers', count: 2.9 });
     const msg = await c.waitFor(
       (m) => m.type === 'status' && m.state === 'listening',
       { label: 'fractional truncated' },
@@ -101,8 +116,7 @@ describe('setPlayers: count clamping', () => {
 
   test('non-numeric count → NaN | 0 = 0 → clamped to 1', async () => {
     const c = await newClient();
-    const basePort = await freeConsecutiveUdpPorts(1);
-    c.send({ action: 'setPlayers', count: 'banana', basePort });
+    c.send({ action: 'setPlayers', count: 'banana' });
     const msg = await c.waitFor(
       (m) => m.type === 'status' && m.state === 'listening',
       { label: 'banana count' },
@@ -111,168 +125,138 @@ describe('setPlayers: count clamping', () => {
   });
 });
 
-describe('setPlayers: basePort fallback', () => {
-  test('basePort = 0 falls back to default UDP_PORT', async () => {
-    const c = await newClient();
-    c.send({ action: 'setPlayers', count: 1, basePort: 0 });
-    const msg = await c.waitFor(
-      (m) => m.type === 'status' && m.state === 'listening',
-      { label: 'fallback zero' },
-    );
-    assert.equal(msg.basePort, defaultUdpPort);
-    assert.equal(msg.players[0].port, defaultUdpPort);
-  });
-
-  test('basePort < 0 falls back to default UDP_PORT', async () => {
-    const c = await newClient();
-    c.send({ action: 'setPlayers', count: 1, basePort: -123 });
-    const msg = await c.waitFor(
-      (m) => m.type === 'status' && m.state === 'listening',
-      { label: 'fallback negative' },
-    );
-    assert.equal(msg.basePort, defaultUdpPort);
-  });
-
-  test('basePort non-numeric falls back to default UDP_PORT', async () => {
-    const c = await newClient();
-    c.send({ action: 'setPlayers', count: 1, basePort: 'nope' });
-    const msg = await c.waitFor(
-      (m) => m.type === 'status' && m.state === 'listening',
-      { label: 'fallback non-numeric' },
-    );
-    assert.equal(msg.basePort, defaultUdpPort);
-  });
-
-  test('omitting basePort entirely uses UDP_PORT — this is what the page sends', async () => {
+describe('ports come from UDP_PORT', () => {
+  test('players are reported on UDP_PORT + index', async () => {
     const c = await newClient();
     c.send({ action: 'setPlayers', count: 2 });
     const msg = await c.waitFor(
       (m) => m.type === 'status' && m.state === 'listening',
-      { label: 'omitted basePort' },
+      { label: 'listening' },
     );
-    assert.equal(msg.basePort, defaultUdpPort);
-    assert.deepEqual(msg.players.map((p) => p.port), [defaultUdpPort, defaultUdpPort + 1]);
+    assert.equal(msg.basePort, server.udpPort);
+    assert.deepEqual(msg.players.map((p) => p.port), [server.udpPort, server.udpPort + 1]);
   });
 });
 
 describe('status carries basePort while stopped', () => {
   // The page has no port control; it labels its panes from the basePort the
   // server advertises, and the greeting is the only status it gets before it
-  // asks for any listeners.
+  // asks for any players.
   test('the connect-time greeting reports the configured base port', async () => {
     const c = createClient(server.wsUrl);
     openClients.add(c);
     await c.connected();
     const greeting = await c.waitFor((m) => m.type === 'status', { label: 'greeting' });
     assert.equal(greeting.state, 'stopped');
-    assert.equal(greeting.basePort, defaultUdpPort);
+    assert.equal(greeting.basePort, server.udpPort);
   });
 });
 
 describe('describePlayers payload shape', () => {
   test('players list is sorted by player index and includes port + ok', async () => {
     const c = await newClient();
-    const basePort = await freeConsecutiveUdpPorts(4);
-    c.send({ action: 'setPlayers', count: 4, basePort });
+    c.send({ action: 'setPlayers', count: 4 });
     const msg = await c.waitFor(
       (m) => m.type === 'status' && m.state === 'listening' && m.players?.length === 4,
       { label: '4-player listening' },
     );
+    const base = server.udpPort;
     assert.deepEqual(
       msg.players,
       [
-        { player: 0, port: basePort + 0, ok: true },
-        { player: 1, port: basePort + 1, ok: true },
-        { player: 2, port: basePort + 2, ok: true },
-        { player: 3, port: basePort + 3, ok: true },
+        { player: 0, port: base + 0, ok: true },
+        { player: 1, port: base + 1, ok: true },
+        { player: 2, port: base + 2, ok: true },
+        { player: 3, port: base + 3, ok: true },
       ],
     );
   });
 });
 
 describe('stop', () => {
-  test('stop tears down all listeners and broadcasts stopped', async () => {
+  test('stop halts forwarding, broadcasts stopped, and keeps the ports bound', async () => {
     const c = await newClient();
-    const basePort = await freeConsecutiveUdpPorts(2);
-    c.send({ action: 'setPlayers', count: 2, basePort });
+    c.send({ action: 'setPlayers', count: 2 });
     await c.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'listening' });
     c.drainStatus();
     c.send({ action: 'stop' });
     const stopMsg = await c.waitFor((m) => m.type === 'status' && m.state === 'stopped', { label: 'stop' });
-    assert.equal(stopMsg.state, 'stopped');
-    // No players field in stopped messages per current behaviour.
+    // No players field in stopped messages.
     assert.equal(stopMsg.players, undefined);
 
-    // Once stopped, the freed ports must actually be released —
-    // confirm by binding them externally.
-    for (const p of [basePort, basePort + 1]) {
-      const sock = dgram.createSocket('udp4');
-      sideSockets.add(sock);
-      await new Promise((resolve, reject) => {
-        sock.once('error', reject);
-        sock.bind(p, '127.0.0.1', resolve);
-      });
+    await send(server.udpPort, pose(1));
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(c.messages.filter((m) => m.type === 'pose').length, 0);
+
+    for (const p of [server.udpPort, server.udpPort + 1]) {
+      await assert.rejects(bind(newSocket(), p), { code: 'EADDRINUSE' });
     }
   });
 });
 
-describe('setPlayers: replace existing', () => {
-  test('calling setPlayers again rebinds with new count/port and frees old ports', async () => {
+describe('setPlayers: changing the count', () => {
+  test('a smaller count stops forwarding the players it drops', async () => {
     const c = await newClient();
-    const portA = await freeConsecutiveUdpPorts(1);
-    c.send({ action: 'setPlayers', count: 1, basePort: portA });
-    await c.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'A listening' });
+    c.send({ action: 'setPlayers', count: 2 });
+    await c.waitFor((m) => m.type === 'status' && m.state === 'listening', { label: 'two listening' });
     c.drainStatus();
-
-    const portB = await freeConsecutiveUdpPorts(2);
-    c.send({ action: 'setPlayers', count: 2, basePort: portB });
+    c.send({ action: 'setPlayers', count: 1 });
     const msg = await c.waitFor(
-      (m) => m.type === 'status' && m.state === 'listening' && m.basePort === portB && m.players?.length === 2,
-      { label: 'B listening' },
+      (m) => m.type === 'status' && m.state === 'listening' && m.players?.length === 1,
+      { label: 'one listening' },
     );
-    assert.equal(msg.basePort, portB);
-    assert.deepEqual(msg.players.map((p) => p.port), [portB, portB + 1]);
+    assert.deepEqual(msg.players, [{ player: 0, port: server.udpPort, ok: true }]);
 
-    // Old port A must be free again.
-    const sock = dgram.createSocket('udp4');
-    sideSockets.add(sock);
-    await new Promise((resolve, reject) => {
-      sock.once('error', reject);
-      sock.bind(portA, '127.0.0.1', resolve);
-    });
+    await send(server.udpPort + 1, pose(2));
+    await send(server.udpPort, pose(1));
+    await c.waitFor((m) => m.type === 'pose', { label: 'player 0 pose' });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(c.messages.filter((m) => m.type === 'pose').map((m) => m.player), [0]);
   });
 });
 
 describe('bind error path', () => {
-  test('binding to an already-used port broadcasts a status:error for that player', async () => {
-    // Squat on a port from a separate dgram socket, then ask the server
-    // to bind it. The server should emit a status:error referencing
-    // that player and port.
-    const conflictPort = await freeUdpPort();
-    const squatter = dgram.createSocket('udp4');
-    sideSockets.add(squatter);
-    await new Promise((resolve, reject) => {
-      squatter.once('error', reject);
-      squatter.bind(conflictPort, '127.0.0.1', resolve);
-    });
+  test('a port busy at startup is reported per player and bound once it frees up', async () => {
+    // A separate server, because the shared one already owns its ports.
+    const udpPort = await freeConsecutiveUdpPorts(4);
+    const squatter = newSocket();
+    await bind(squatter, udpPort + 1);
+    const own = await startServer({ httpPort: await freeTcpPort(), udpPort });
+    try {
+      assert.match(own.stderr, new RegExp(`player 1 on :${udpPort + 1} error`));
 
-    const c = await newClient();
-    c.send({ action: 'setPlayers', count: 1, basePort: conflictPort });
-    const errMsg = await c.waitFor(
-      (m) => m.type === 'status' && m.state === 'error',
-      { label: 'bind error', timeoutMs: 3000 },
-    );
-    assert.equal(errMsg.player, 0);
-    assert.equal(errMsg.port, conflictPort);
-    assert.ok(typeof errMsg.message === 'string' && errMsg.message.length > 0,
-      'error message should be a non-empty string');
+      const c = await newClient(own);
+      c.send({ action: 'setPlayers', count: 2 });
+      const msg = await c.waitFor(
+        (m) => m.type === 'status' && m.state === 'listening',
+        { label: 'listening with a failed port' },
+      );
+      assert.deepEqual(msg.players[0], { player: 0, port: udpPort, ok: true });
+      assert.equal(msg.players[1].player, 1);
+      assert.equal(msg.players[1].port, udpPort + 1);
+      assert.equal(msg.players[1].ok, false);
+      assert.ok(typeof msg.players[1].message === 'string' && msg.players[1].message.length > 0,
+        'failed player should carry the bind error');
 
-    // After the failure, since no socket bound successfully,
-    // broadcastStatus should report 'stopped' (sockets.size === 0).
-    const stopped = await c.waitFor(
-      (m) => m.type === 'status' && m.state === 'stopped',
-      { label: 'stopped after failure', timeoutMs: 3000 },
-    );
-    assert.equal(stopped.state, 'stopped');
+      // The retry also fails while the port is held, and says so.
+      const retryErr = await c.waitFor(
+        (m) => m.type === 'status' && m.state === 'error',
+        { label: 'retry error' },
+      );
+      assert.equal(retryErr.player, 1);
+      assert.equal(retryErr.port, udpPort + 1);
+
+      await new Promise((r) => squatter.close(r));
+      sideSockets.delete(squatter);
+      c.drainStatus();
+      c.send({ action: 'setPlayers', count: 2 });
+      const recovered = await c.waitFor(
+        (m) => m.type === 'status' && m.state === 'listening',
+        { label: 'listening after the port frees up' },
+      );
+      assert.deepEqual(recovered.players[1], { player: 1, port: udpPort + 1, ok: true });
+    } finally {
+      await own.stop();
+    }
   });
 });

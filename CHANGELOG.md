@@ -3,7 +3,7 @@
 Notable changes per release. Versions follow [semver](https://semver.org); the
 Docker Hub tags mirror them (`0.0.1`, `0.0`, `0`, `latest`).
 
-## Unreleased
+## 0.0.2 (2026-09-28)
 
 - **Fixed: only one tracker reaching the container under Docker Desktop.** The
   UDP ports were bound only when the page asked for players, so a tracker that

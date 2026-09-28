@@ -35,7 +35,7 @@
     "screenshots": "node scripts/screenshot-scenes.mjs"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "playwright": "^1.60.0"
